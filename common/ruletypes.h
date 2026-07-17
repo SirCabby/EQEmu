@@ -1054,6 +1054,7 @@ RULE_CATEGORY_END()
 
 RULE_CATEGORY(Client)
 RULE_BOOL(Client, UseLiveFactionMessage, false, "Allows players to see detailed faction adjustments as on the live servers")
+RULE_BOOL(Client, RcpFactionVision, false, "rof2ClientPlus: emit [RcpFac] tagged faction id/value lines on faction hits and consider")
 RULE_BOOL(Client, UseLiveBlockedMessage, false, "Setting whether detailed spell block messages should be used as on the live servers")
 RULE_CATEGORY_END()
 

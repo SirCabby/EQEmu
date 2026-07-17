@@ -5192,6 +5192,26 @@ void Client::Handle_OP_Consider(const EQApplicationPacket *app)
 	}
 
 	QueuePacket(outapp);
+
+	// rof2ClientPlus faction vision: on con, report the NPC's primary faction id + your
+	// standing (personal current + effective) as a tagged line the client mod reformats.
+	if (RuleB(Client, RcpFactionVision) && t->IsNPC()) {
+		int32 pf = t->CastToNPC()->GetPrimaryFaction();
+		if (pf > 0) {
+			char fname[50];
+			if (!content_db.GetFactionName(pf, fname, sizeof(fname))) {
+				snprintf(fname, sizeof(fname), "Faction%i", pf);
+			}
+			Message(
+				Chat::Yellow,
+				fmt::format(
+					"[RcpFac]t=con|id={}|cur={}|eff={}|nm={}",
+					pf, GetCharacterFactionLevel(pf), GetModCharacterFactionLevel(pf), fname
+				).c_str()
+			);
+		}
+	}
+
 	// only wanted to check raid target once
 	// and need con to still be around so, do it here!
 	if (t->IsRaidTarget()) {

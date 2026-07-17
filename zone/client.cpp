@@ -8562,7 +8562,23 @@ void Client::SendFactionMessage(int32 tmpvalue, int32 faction_id, int32 faction_
 
 	if (tmpvalue == 0 || temp == 1 || temp == 2) {
 		return;
-	} else if (faction_value >= this_faction_max) {
+	}
+
+	// rof2ClientPlus faction vision: emit a machine-parseable line the client mod
+	// reformats and suppresses. Supersedes the stock faction message when enabled.
+	if (RuleB(Client, RcpFactionVision)) {
+		Message(
+			Chat::Yellow,
+			fmt::format(
+				"[RcpFac]t=kill|id={}|d={}|cur={}|eff={}|min={}|max={}|nm={}",
+				faction_id, tmpvalue, totalvalue, GetModCharacterFactionLevel(faction_id),
+				this_faction_min, this_faction_max, name
+			).c_str()
+		);
+		return;
+	}
+
+	if (faction_value >= this_faction_max) {
 		MessageString(Chat::Yellow, FACTION_BEST, name);
 	} else if (faction_value <= this_faction_min) {
 		MessageString(Chat::Yellow, FACTION_WORST, name);
