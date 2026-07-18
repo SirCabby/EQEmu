@@ -121,7 +121,10 @@ private:
 	bool      m_disable_timer;
 	bool      m_is_open;
 	Timer     m_close_timer;
-	char      m_destination_zone_name[16];
+	// AKK-STACK: was [16], which truncated 16+ char dest_zone names (nektulos_classic=16,
+	// lavastorm_classic=17) so teleport doors like the PoK books mis-resolved and moved the player
+	// locally (out of bounds) instead of zoning. Widened to match zone.short_name (varchar(32)).
+	char      m_destination_zone_name[32];
 	int       m_destination_instance_id;
 	glm::vec4 m_destination;
 	uint8     m_is_ldon_door;

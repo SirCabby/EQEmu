@@ -139,10 +139,24 @@ void Client::Handle_OP_ZoneChange(const EQApplicationPacket *app) {
 			//if we didnt get a zone point, or its to a different zone,
 			//then we assume this is invalid.
 			if (!zone_point || zone_point->target_zone_id != target_zone_id) {
-				LogError("Zoning [{}]: Invalid unsolicited zone request to zone id [{}]", GetName(), target_zone_id);
-				cheat_manager.CheatDetected(GetBindZoneID() == target_zone_id ? MQGate : MQZone, glm::vec3(zc->x, zc->y, zc->z));
-				SendZoneCancel(zc);
-				return;
+				// AKK-STACK PATCH: classic-clone zones (nektulos_classic 991, lavastorm_classic 990,
+				// bazaar_classic 992) run RENAMED base geometry, so on a clone<->clone zone line the
+				// RoF2 client requests the BASE zone id (e.g. lavastorm 27) even though the server's
+				// zone_point retargets it to the sibling clone (990). The strict target-match above
+				// rejects that. Fall back to the closest real zone line the player is standing on
+				// (the same resolution the engine uses when the client sends zoneID 0) and honor its
+				// destination instead of cancelling.
+				ZonePoint* alt = zone->GetClosestZonePointWithoutZone(GetX(), GetY(), GetZ(), this, ZONEPOINT_NOZONE_RANGE);
+				if (alt) {
+					zone_point         = alt;
+					target_zone_id     = alt->target_zone_id;
+					target_instance_id = alt->target_zone_instance;
+				} else {
+					LogError("Zoning [{}]: Invalid unsolicited zone request to zone id [{}]", GetName(), target_zone_id);
+					cheat_manager.CheatDetected(GetBindZoneID() == target_zone_id ? MQGate : MQZone, glm::vec3(zc->x, zc->y, zc->z));
+					SendZoneCancel(zc);
+					return;
+				}
 			}
 		}
 	}
