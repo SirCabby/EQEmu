@@ -68,6 +68,7 @@ void command_apply_shared_memory(Client *c, const Seperator *sep);
 void command_attack(Client *c, const Seperator *sep);
 void command_augmentitem(Client *c, const Seperator *sep);
 void command_ban(Client *c, const Seperator *sep);
+void command_book(Client *c, const Seperator *sep);
 void command_bugs(Client *c, const Seperator *sep);
 void command_camerashake(Client *c, const Seperator *sep);
 void command_castspell(Client *c, const Seperator *sep);

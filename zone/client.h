@@ -973,6 +973,17 @@ public:
 	void SaveSpells();
 	void SaveDisciplines();
 
+	// Server-side spellbook volumes: the client's native 720-slot book is a window onto
+	// volume*SPELLBOOK_SIZE within character_spells. Volume 0 is byte-identical to stock
+	// behavior. SwapSpellbookVolume saves the current volume, loads another slice from the
+	// DB, and pushes the changed slots to the client (no client patch, no wire-size change).
+	static constexpr int MAX_SPELLBOOK_VOLUMES = 4;   // 4 * 720 = 2880 storable spells
+	void SwapSpellbookVolume(int new_volume);
+	inline int GetSpellbookVolume() const { return m_spellbook_volume; }
+	inline uint32 SpellbookVolumeBase() const {
+		return (uint32) m_spellbook_volume * EQ::spells::SPELLBOOK_SIZE;
+	}
+
 	// Bulk Scribe/Learn
 	uint16 ScribeSpells(uint8 min_level, uint8 max_level);
 	uint16 LearnDisciplines(uint8 min_level, uint8 max_level);
@@ -2206,6 +2217,7 @@ private:
 
 	bool m_lazy_load_bank            = false;
 	int  m_lazy_load_sent_bank_slots = 0;
+	int  m_spellbook_volume          = 0;   // active spellbook volume (server-side volumes)
 
 	glm::vec3 m_Proximity;
 

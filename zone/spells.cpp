@@ -6006,7 +6006,8 @@ void Client::ScribeSpell(uint16 spell_id, int slot, bool update_client, bool def
 
 	// defer save if we're bulk saving elsewhere
 	if (!defer_save) {
-		database.SaveCharacterSpell(CharacterID(), spell_id, slot);
+		// server-side volumes: the book slot maps to volume*SPELLBOOK_SIZE + slot in the DB
+		database.SaveCharacterSpell(CharacterID(), spell_id, SpellbookVolumeBase() + slot);
 	}
 	LogSpells("Spell [{}] scribed into spell book slot [{}]", spell_id, slot);
 
@@ -6024,7 +6025,8 @@ void Client::UnscribeSpell(int slot, bool update_client, bool defer_save)
 	LogSpells("Spell [{}] erased from spell book slot [{}]", m_pp.spell_book[slot], slot);
 
 	if (!defer_save) {
-		database.DeleteCharacterSpell(CharacterID(), slot);
+		// server-side volumes: erase the DB slot for the active volume
+		database.DeleteCharacterSpell(CharacterID(), SpellbookVolumeBase() + slot);
 	}
 
 	if (update_client && slot < EQ::spells::DynamicLookup(ClientVersion(), GetGM())->SpellbookSize) {

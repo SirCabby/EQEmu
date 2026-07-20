@@ -11563,20 +11563,89 @@ void Client::SaveSpells()
 {
 	std::vector<CharacterSpellsRepository::CharacterSpells> character_spells = {};
 
+	// server-side volumes: this book is volume V; persist it into DB slots [base, base+SIZE)
+	const uint32 base = SpellbookVolumeBase();
+
 	for (int index = 0; index < EQ::spells::SPELLBOOK_SIZE; index++) {
 		if (IsValidSpell(m_pp.spell_book[index])) {
 			auto spell = CharacterSpellsRepository::NewEntity();
 			spell.id       = CharacterID();
-			spell.slot_id  = index;
+			spell.slot_id  = base + index;
 			spell.spell_id = m_pp.spell_book[index];
 			character_spells.emplace_back(spell);
 		}
 	}
 
-	CharacterSpellsRepository::DeleteWhere(database, fmt::format("id = {}", CharacterID()));
+	// Only rewrite THIS volume's slot range so the other volumes are preserved.
+	CharacterSpellsRepository::DeleteWhere(
+		database,
+		fmt::format(
+			"id = {} AND slot_id >= {} AND slot_id < {}",
+			CharacterID(), base, base + EQ::spells::SPELLBOOK_SIZE
+		)
+	);
 
 	if (!character_spells.empty()) {
 		CharacterSpellsRepository::InsertMany(database, character_spells);
+	}
+}
+
+// Server-side spellbook volumes: save the current volume, load a different 720-slot slice
+// from character_spells (DB slot_id = new_volume*SPELLBOOK_SIZE + book_slot), and push only
+// the changed slots to the client (scribe for filled, delete for emptied). No client patch,
+// no wire-size change — the client's native book just repaints with the new slice.
+void Client::SwapSpellbookVolume(int new_volume)
+{
+	if (new_volume < 0 || new_volume >= MAX_SPELLBOOK_VOLUMES) {
+		Message(Chat::Red, "Invalid spellbook volume %d (valid 0-%d).", new_volume, MAX_SPELLBOOK_VOLUMES - 1);
+		return;
+	}
+	if (new_volume == m_spellbook_volume) {
+		Message(Chat::White, "Already on spellbook volume %d.", new_volume);
+		return;
+	}
+
+	SaveSpells(); // persist the current volume before switching
+
+	// snapshot the current book so we only send the client the slots that actually change
+	std::vector<uint32> old_book(m_pp.spell_book, m_pp.spell_book + EQ::spells::SPELLBOOK_SIZE);
+
+	m_spellbook_volume = new_volume;
+	const uint32 base  = SpellbookVolumeBase();
+
+	memset(m_pp.spell_book, UINT8_MAX, sizeof(uint32) * EQ::spells::SPELLBOOK_SIZE);
+
+	const auto& rows = CharacterSpellsRepository::GetWhere(
+		database,
+		fmt::format(
+			"id = {} AND slot_id >= {} AND slot_id < {}",
+			CharacterID(), base, base + EQ::spells::SPELLBOOK_SIZE
+		)
+	);
+	for (const auto& e : rows) {
+		const int book_slot = (int) e.slot_id - (int) base;
+		if (EQ::ValueWithin(book_slot, 0, EQ::spells::SPELLBOOK_SIZE - 1) && IsValidSpell(e.spell_id)) {
+			m_pp.spell_book[book_slot] = e.spell_id;
+		}
+	}
+
+	// The per-slot scribe/delete burst below is muted client-side by the akk-stack client-pack:
+	// its injector opens a short mute window the instant it fires the page-turn swap command, so
+	// the "finished scribing" / "removed from your spellbook" spam never reaches the chat window.
+	for (int slot = 0; slot < EQ::spells::SPELLBOOK_SIZE; slot++) {
+		if (m_pp.spell_book[slot] == old_book[slot]) {
+			continue;
+		}
+		if (IsValidSpell(m_pp.spell_book[slot])) {
+			MemorizeSpell(slot, m_pp.spell_book[slot], memSpellScribing);
+		} else {
+			auto  outapp = new EQApplicationPacket(OP_DeleteSpell, sizeof(DeleteSpell_Struct));
+			auto* del    = (DeleteSpell_Struct *) outapp->pBuffer;
+			del->spell_slot = slot;
+			del->success    = 1;
+			QueuePacket(outapp);
+			safe_delete(outapp);
+		}
 	}
 }
 

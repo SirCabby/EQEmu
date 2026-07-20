@@ -105,6 +105,7 @@ int command_init(void)
 		command_add("attack", "[Entity Name] - Make your NPC target attack an entity by name", AccountStatus::GMLeadAdmin, command_attack) ||
 		command_add("augmentitem", "Force augments an item. Must have the augment item window open.", AccountStatus::GMImpossible, command_augmentitem) ||
 		command_add("ban", "[Character Name] [Reason] - Ban by character name", AccountStatus::GMLeadAdmin, command_ban) ||
+		command_add("book", "[volume] - Switch your spellbook to a different 720-slot volume (server-side volumes)", AccountStatus::Player, command_book) ||
 		command_add("bugs", "[Close|Delete|Review|Search|View] - Handles player bug reports", AccountStatus::QuestTroupe, command_bugs) ||
 		(RuleB(Bots, Enabled) && command_add("bot", "Type \"#bot help\" or \"^help\" to the see the list of available commands for bots.", AccountStatus::Player, command_bot)) ||
 		command_add("camerashake", "[Duration (Milliseconds)] [Intensity (1-10)] - Shakes the camera on everyone's screen globally.", AccountStatus::QuestTroupe, command_camerashake) ||

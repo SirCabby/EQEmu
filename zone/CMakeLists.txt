@@ -377,6 +377,7 @@ set(gm_command_sources
     gm_commands/attack.cpp
     gm_commands/augmentitem.cpp
     gm_commands/ban.cpp
+    gm_commands/book.cpp
     gm_commands/bugs.cpp
     gm_commands/camerashake.cpp
     gm_commands/castspell.cpp

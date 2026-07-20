@@ -359,6 +359,7 @@ void MapOpcodes()
 	ConnectedOpcodes[OP_SafeFallSuccess] = &Client::Handle_OP_SafeFallSuccess;
 	ConnectedOpcodes[OP_SafePoint] = &Client::Handle_OP_SafePoint;
 	ConnectedOpcodes[OP_Save] = &Client::Handle_OP_Save;
+	ConnectedOpcodes[OP_SpellBookSwap] = &Client::Handle_OP_SpellBookSwap;
 	ConnectedOpcodes[OP_SaveOnZoneReq] = &Client::Handle_OP_SaveOnZoneReq;
 	ConnectedOpcodes[OP_SelectTribute] = &Client::Handle_OP_SelectTribute;
 	ConnectedOpcodes[OP_SenseHeading] = &Client::Handle_OP_SenseHeading;
@@ -13788,6 +13789,21 @@ void Client::Handle_OP_Save(const EQApplicationPacket *app)
 void Client::Handle_OP_SaveOnZoneReq(const EQApplicationPacket *app)
 {
 	Handle_OP_Save(app);
+}
+
+// akk-stack: server-side spellbook volumes. The client-pack injector sends this custom packet on a
+// page-turn past a book boundary or via "/book <N>" (a 1-byte body = the target volume). No chat
+// command is involved. We swap the native 720-slot book to that volume's slice of character_spells.
+void Client::Handle_OP_SpellBookSwap(const EQApplicationPacket *app)
+{
+	if (!app || app->size < 1) {
+		return;
+	}
+	const int target = (int) app->pBuffer[0];
+	if (target < 0 || target >= MAX_SPELLBOOK_VOLUMES || target == m_spellbook_volume) {
+		return;
+	}
+	SwapSpellbookVolume(target);
 }
 
 void Client::Handle_OP_SelectTribute(const EQApplicationPacket *app)

@@ -344,6 +344,11 @@ namespace RoF2
 		};
 
 		const int SPELL_ID_MAX = 45000;
+		// akk-stack: TEMPORARILY reverted to 720 while the client-side OP_PlayerProfile parser
+		// is taught to accept a >720 spellbook count. Sending 1600 in the profile hangs the
+		// client at enter-world (the profile parse desyncs); storage/UI/bounds are already
+		// patched client-side (eqemu-ops/client-pack) and the array holds 1600. Bump back to
+		// 1600 once the client profile parser is fixed. See spellbook-200-pages-project memory.
 		const int SPELLBOOK_SIZE = 720;
 		const int SPELL_GEM_COUNT = static_cast<uint32>(CastingSlot::MaxGems);
 

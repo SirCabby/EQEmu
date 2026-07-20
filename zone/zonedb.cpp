@@ -629,7 +629,11 @@ bool ZoneDatabase::LoadCharacterSpellBook(uint32 character_id, PlayerProfile_Str
 	// Load them all so that server actions are valid..but, nix them in translators.
 
 	for (const auto& e : l) {
-		if (!EQ::ValueWithin(e.slot_id, 0, EQ::spells::SPELLBOOK_SIZE)) {
+		// Load only volume 0 (slots 0..SPELLBOOK_SIZE-1) into the profile at login. character_spells
+		// now also holds higher server-side volumes (slot_id >= SPELLBOOK_SIZE); those are swapped in
+		// on demand by SwapSpellbookVolume, never loaded here (and slot_id==SPELLBOOK_SIZE would also
+		// overflow the fixed-size pp->spell_book array — the old inclusive bound was an off-by-one).
+		if (!EQ::ValueWithin(e.slot_id, 0, EQ::spells::SPELLBOOK_SIZE - 1)) {
 			continue;
 		}
 
