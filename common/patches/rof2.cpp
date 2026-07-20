@@ -2422,7 +2422,7 @@ namespace RoF2
 		eq->FilterID = 2008; // Guild Lobby observed value
 		OUT(lava_damage);
 		OUT(min_lava_damage);
-		eq->bDisallowManaStone     = 1;
+		eq->bDisallowManaStone     = 0;	// akk-stack: allow Manastone use in every zone (0 = allowed). Stock EQEmu hardcodes 1, which lets the RoF2 client permit the clicky only in its built-in classic-zone list; 0 tells the client it is usable here too, so it works server-wide.
 		eq->bNoBind                = 0;
 		eq->bNoAttack              = 0;
 		eq->bNoCallOfHero          = 0;
