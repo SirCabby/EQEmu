@@ -1095,6 +1095,7 @@ RULE_CATEGORY_END()
 
 RULE_CATEGORY(Expansion)
 RULE_INT(Expansion, CurrentExpansion, -1, "The current expansion enabled for the server [-1 = ALL, 0 = Classic, 1 = Kunark etc.]")
+RULE_BOOL(Expansion, AutoLevelCapByExpansion, false, "When true, Character:MaxLevel and Character:MaxExpLevel are derived from the era level cap of Expansion:CurrentExpansion (Classic 50, Kunark 60, PoP 65 ...), overriding their database values. No effect when CurrentExpansion is -1 (ALL)")
 RULE_BOOL(Expansion, UseCurrentExpansionAAOnly, false, "When true will only load AA ranks that match CurrentExpansion rule")
 RULE_INT(Expansion, AutoGrantAAExpansion, -1, "Expansion to auto grant AAs up to, [-1 = Disabled, 0 = Classic, 1 = Kunark etc.]")
 RULE_CATEGORY_END()

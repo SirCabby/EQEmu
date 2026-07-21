@@ -101,6 +101,51 @@ namespace Expansion {
 		"The Burning Lands",
 		"Torment of Velious",
 	};
+
+	/**
+	 * The player level cap during each expansion's era, indexed by ExpansionNumber
+	 * (used by the Expansion:AutoLevelCapByExpansion rule)
+	 */
+	static const uint8 ExpansionLevelCap[ExpansionNumber::MaxId] = {
+		50,  // Classic
+		60,  // The Ruins of Kunark
+		60,  // The Scars of Velious
+		60,  // The Shadows of Luclin
+		65,  // The Planes of Power
+		65,  // The Legacy of Ykesha
+		65,  // Lost Dungeons of Norrath
+		65,  // Gates of Discord
+		70,  // Omens of War
+		70,  // Dragons of Norrath
+		70,  // Depths of Darkhollow
+		70,  // Prophecy of Ro
+		75,  // The Serpent's Spine
+		75,  // The Buried Sea
+		80,  // Secrets of Faydwer
+		85,  // Seeds of Destruction
+		85,  // Underfoot
+		90,  // House of Thule
+		95,  // Veil of Alaris
+		100, // Rain of Fear
+		100, // Call of the Forsaken
+		105, // The Darkened Sea
+		105, // The Broken Mirror
+		105, // Empires of Kunark
+		110, // Ring of Scale
+		110, // The Burning Lands
+		115, // Torment of Velious
+	};
+
+	// 0 = no era cap (EXPANSION_ALL / unset); expansions past the enum use the latest known cap
+	static inline uint8 GetLevelCap(int expansion) {
+		if (expansion < 0) {
+			return 0;
+		}
+		if (expansion >= ExpansionNumber::MaxId) {
+			expansion = ExpansionNumber::MaxId - 1;
+		}
+		return ExpansionLevelCap[expansion];
+	}
 }
 
 class WorldContentService {

@@ -17,6 +17,7 @@
 */
 #include "rulesys.h"
 
+#include "common/content/world_content_service.h"
 #include "common/database.h"
 #include "common/eqemu_logsys.h"
 #include "common/repositories/rule_sets_repository.h"
@@ -320,6 +321,8 @@ bool RuleManager::LoadRules(Database *db, const std::string &rule_set_name, bool
 		}
 	}
 
+	_ApplyDerivedLevelCaps(reload);
+
 	LogInfo(
 		"Loaded [{}] rules(s) in rule_set [{}] id [{}]",
 		Strings::Commify(std::to_string(l.size())),
@@ -328,6 +331,36 @@ bool RuleManager::LoadRules(Database *db, const std::string &rule_set_name, bool
 	);
 
 	return true;
+}
+
+void RuleManager::_ApplyDerivedLevelCaps(bool reload)
+{
+	if (!GetBoolRule(Bool__AutoLevelCapByExpansion)) {
+		return;
+	}
+
+	const int   expansion = GetIntRule(Int__CurrentExpansion);
+	const uint8 level_cap = Expansion::GetLevelCap(expansion);
+	if (!level_cap) {
+		LogRules(
+			"Expansion:AutoLevelCapByExpansion is enabled but Expansion:CurrentExpansion [{}] has no era cap, level cap rules unchanged",
+			expansion
+		);
+		return;
+	}
+
+	const std::string value = std::to_string(level_cap);
+	SetRule("Character:MaxLevel", value, nullptr, false, reload);
+	SetRule("Character:MaxExpLevel", value, nullptr, false, reload);
+
+	LogInfo(
+		"Set Character:MaxLevel and Character:MaxExpLevel to [{}] for current expansion [{}] ({})",
+		level_cap,
+		expansion,
+		expansion < Expansion::ExpansionNumber::MaxId
+			? Expansion::ExpansionName[expansion]
+			: Expansion::ExpansionName[Expansion::ExpansionNumber::MaxId - 1]
+	);
 }
 
 void RuleManager::SaveRules(Database *db, const std::string &rule_set_name) {

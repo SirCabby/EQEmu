@@ -181,6 +181,7 @@ private:
 	static const std::string& _GetRuleNotes(RuleType type, uint16 index);
 	static int _FindOrCreateRuleset(Database* db, const std::string& rule_set_name);
 	void _SaveRule(Database* db, RuleType type, uint16 index);
+	void _ApplyDerivedLevelCaps(bool reload);
 
 	static const char* s_categoryNames[];
 	typedef struct {
