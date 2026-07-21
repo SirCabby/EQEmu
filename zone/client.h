@@ -2049,6 +2049,7 @@ private:
 	void DoHPRegen();
 	void DoManaRegen();
 	void DoStaminaHungerUpdate();
+	void SendStaminaTickKeepAlive(); // akk-stack: per-tick OP_Stamina (unchanged food/water) so the client tick mod can lock onto the 6s server tick
 	void CalcRestState();
 	// if they have aggro (AggroCount != 0) their timer is saved in m_pp.RestTimer, else we need to get current timer
 	inline uint32 GetRestTimer() const { return AggroCount ? m_pp.RestTimer : rest_timer.GetRemainingTime() / 1000; }

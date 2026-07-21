@@ -527,6 +527,11 @@ bool Client::Process() {
 			DoEnduranceRegen();
 			BuffProcess();
 
+			// akk-stack: heartbeat the 6s server tick to the client every tick (OP_Stamina with
+			// unchanged food/water). Lets the client-side tick mod lock onto the tick phase; it is a
+			// harmless no-op refresh for a vanilla client (same food/water values it already shows).
+			SendStaminaTickKeepAlive();
+
 			if (auto_attack) {
 				ResetAFKTimer();
 			}
@@ -1986,6 +1991,27 @@ void Client::DoStaminaHungerUpdate()
 		m_pp.thirst_level,
 		m_pp.thirst_level
 	);
+
+	FastQueuePacket(&outapp);
+}
+
+// akk-stack: re-send the CURRENT food/water every server tick WITHOUT consuming, so a client-side tick
+// mod can lock onto the 6s server tick -- an OP_Stamina whose food/water are unchanged from what the
+// client already holds signals "the server just ticked" (the technique Zeal uses). The value selection
+// mirrors DoStaminaHungerUpdate exactly (so it equals what the client last received and nothing visibly
+// changes on a vanilla client); it just never decrements. Sent from the tic_timer block below.
+void Client::SendStaminaTickKeepAlive()
+{
+	auto outapp = new EQApplicationPacket(OP_Stamina, sizeof(Stamina_Struct));
+	auto sta    = (Stamina_Struct*) outapp->pBuffer;
+
+	if (zone->GetZoneID() != Zones::BAZAAR && !GetGM()) {
+		sta->food  = EQ::Clamp(m_pp.hunger_level, 0, 6000);
+		sta->water = EQ::Clamp(m_pp.thirst_level, 0, 6000);
+	} else {
+		sta->food  = 6000;
+		sta->water = 6000;
+	}
 
 	FastQueuePacket(&outapp);
 }
