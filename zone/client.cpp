@@ -11649,6 +11649,229 @@ void Client::SwapSpellbookVolume(int new_volume)
 	}
 }
 
+// -----------------------------------------------------------------------------------------------
+// akk-stack: limitless paged personal bank.
+//
+// The RoF2 client caps the personal bank at 24 slots (server slots 2000-2023, with bag contents
+// at 6210-11009). We treat those live `inventory` rows as a *window* onto page N of unlimited
+// storage: the ACTIVE page always lives in `inventory` (so GM tools, backups and an unmodded
+// client keep working), while every INACTIVE page is parked in `character_bank` (identical
+// columns + a `page` discriminator). `character_bank_state.active_page` records which page the
+// live `inventory` rows currently represent.
+//
+// A swap is one transaction that moves the bank rows between the two tables (plain
+// INSERT ... SELECT -- the columns match, so no item re-serialization), then repaints the
+// client's bank slots. Because every bank item lives in exactly one of the two tables at all
+// times, a crash mid-swap can neither duplicate nor lose items. Modeled on SwapSpellbookVolume().
+// -----------------------------------------------------------------------------------------------
+
+// The 17 data columns shared by `inventory` and `character_bank`, in a fixed order.
+static const char *bank_page_columns =
+	"character_id, slot_id, item_id, charges, color, "
+	"augment_one, augment_two, augment_three, augment_four, augment_five, augment_six, "
+	"instnodrop, custom_data, ornament_icon, ornament_idfile, ornament_hero_model, guid";
+
+// SQL predicate matching a character's personal-bank rows in `inventory`: the 24 top-level slots
+// plus their bag contents. Shared bank lives in a separate table, so it is never touched here.
+static std::string BankRowsWhere(uint32 char_id)
+{
+	return fmt::format(
+		"`character_id` = {} AND ((`slot_id` BETWEEN {} AND {}) OR (`slot_id` BETWEEN {} AND {}))",
+		char_id,
+		EQ::invslot::BANK_BEGIN, EQ::invslot::BANK_END,
+		EQ::invbag::BANK_BAGS_BEGIN, EQ::invbag::BANK_BAGS_END
+	);
+}
+
+// Load which page the live `inventory` bank rows currently represent. Called at zone entry.
+// A character with no state row defaults to page 0 (a normal, single-page bank).
+void Client::LoadBankPageState()
+{
+	m_bank_page       = 0;
+	m_bank_page_count = 1;
+
+	auto results = database.QueryDatabase(
+		fmt::format(
+			"SELECT active_page, page_count FROM character_bank_state WHERE character_id = {}",
+			CharacterID()
+		)
+	);
+	if (results.Success() && results.RowCount() > 0) {
+		auto row          = results.begin();
+		m_bank_page       = Strings::ToInt(row[0]);
+		m_bank_page_count = std::max(1, Strings::ToInt(row[1]));
+	}
+}
+
+// Reload the active-page bank items from the `inventory` table into the in-memory profile.
+// Mirrors the per-row reconstruction in SharedDatabase::GetInventory(), scoped to bank slots.
+// Rows are ordered by slot_id so each parent bag is placed before its contents nest into it.
+// Note: evolving-item progression is not specially re-hydrated here (no evolving items exist on
+// this classic-era server); revisit if evolving items are ever enabled.
+void Client::LoadBankSlotsFromInventory()
+{
+	auto rows = InventoryRepository::GetWhere(
+		database,
+		fmt::format("{} ORDER BY `slot_id`", BankRowsWhere(CharacterID()))
+	);
+
+	const auto timestamps = database.GetItemRecastTimestamps(CharacterID());
+
+	for (const auto &row : rows) {
+		const EQ::ItemData *item = database.GetItem(row.item_id);
+		if (!item) {
+			continue;
+		}
+
+		EQ::ItemInstance *inst = database.CreateBaseItem(item, row.charges);
+		if (!inst) {
+			continue;
+		}
+
+		if (!row.custom_data.empty()) {
+			inst->SetCustomDataString(row.custom_data);
+		}
+
+		inst->SetOrnamentIcon(row.ornament_icon);
+		inst->SetOrnamentationIDFile(row.ornament_idfile);
+		inst->SetOrnamentHeroModel(item->HerosForgeModel);
+
+		if (row.instnodrop) {
+			inst->SetAttuned(true);
+		}
+
+		if (row.color > 0) {
+			inst->SetColor(row.color);
+		}
+
+		if (row.charges == std::numeric_limits<int16>::max()) {
+			inst->SetCharges(-1);
+		} else if (row.charges == 0 && inst->IsStackable()) {
+			inst->SetCharges(1);
+		} else {
+			inst->SetCharges(row.charges);
+		}
+
+		if (item->RecastDelay) {
+			if (item->RecastType != RECAST_TYPE_UNLINKED_ITEM && timestamps.count(item->RecastType)) {
+				inst->SetRecastTimestamp(timestamps.at(item->RecastType));
+			} else if (item->RecastType == RECAST_TYPE_UNLINKED_ITEM && timestamps.count(item->ID)) {
+				inst->SetRecastTimestamp(timestamps.at(item->ID));
+			} else {
+				inst->SetRecastTimestamp(0);
+			}
+		}
+
+		if (item->IsClassCommon()) {
+			const uint32 augment_ids[EQ::invaug::SOCKET_COUNT] = {
+				row.augment_one, row.augment_two, row.augment_three,
+				row.augment_four, row.augment_five, row.augment_six
+			};
+			for (int i = EQ::invaug::SOCKET_BEGIN; i <= EQ::invaug::SOCKET_END; i++) {
+				if (augment_ids[i]) {
+					inst->PutAugment(&database, i, augment_ids[i]);
+				}
+			}
+		}
+
+		m_inv.PutItem((int16) row.slot_id, *inst);
+		safe_delete(inst);
+	}
+}
+
+void Client::SwapBankPage(int new_page)
+{
+	// next/prev past an end is a silent no-op so a client page-turn stays put where it is.
+	if (new_page < 0 || new_page == m_bank_page) {
+		return;
+	}
+
+	// keep pages contiguous: you may open any existing page, or create exactly the next one.
+	if (new_page > m_bank_page_count) {
+		Message(Chat::Red, "Bank page %d does not exist yet.", new_page);
+		return;
+	}
+
+	// every bank interaction requires a nearby banker (mirrors OP_BankerChange / SwapItem).
+	uint32 distance = 0;
+	NPC   *banker   = entity_list.GetClosestBanker(this, distance);
+	if (!banker || distance > USE_NPC_RANGE2) {
+		Message(Chat::Red, "You must be near a banker to change bank pages.");
+		return;
+	}
+
+	const uint32      char_id  = CharacterID();
+	const int         old_page = m_bank_page;
+	const std::string where    = BankRowsWhere(char_id);
+
+	// 1) make sure the `inventory` bank rows exactly match memory before we park them.
+	//    (bank moves already persist immediately, but this removes any doubt.)
+	for (int16 s = EQ::invslot::BANK_BEGIN; s <= EQ::invslot::BANK_END; s++) {
+		database.SaveInventory(char_id, m_inv[s], s); // recurses bag contents; nullptr => delete
+	}
+
+	// 2) transactionally move the bank rows between `inventory` and `character_bank`.
+	database.TransactionBegin();
+
+	bool ok  = true;
+	auto run = [&](const std::string &sql) {
+		if (ok && !database.QueryDatabase(sql).Success()) {
+			ok = false;
+			LogError("[SwapBankPage] query failed for character [{}]", char_id);
+		}
+	};
+
+	// park the current page
+	run(fmt::format(
+		"INSERT INTO character_bank (page, {}) SELECT {}, {} FROM inventory WHERE {}",
+		bank_page_columns, old_page, bank_page_columns, where
+	));
+	run(fmt::format("DELETE FROM inventory WHERE {}", where));
+
+	// load the requested page
+	run(fmt::format(
+		"INSERT INTO inventory ({}) SELECT {} FROM character_bank WHERE character_id = {} AND page = {}",
+		bank_page_columns, bank_page_columns, char_id, new_page
+	));
+	run(fmt::format("DELETE FROM character_bank WHERE character_id = {} AND page = {}", char_id, new_page));
+
+	// persist the new active page + grow the page count if we just created a page.
+	const int new_count = std::max(m_bank_page_count, new_page + 1);
+	run(fmt::format(
+		"INSERT INTO character_bank_state (character_id, active_page, page_count) VALUES ({}, {}, {}) "
+		"ON DUPLICATE KEY UPDATE active_page = {}, page_count = GREATEST(page_count, {})",
+		char_id, new_page, new_count, new_page, new_count
+	));
+
+	if (!ok) {
+		database.TransactionRollback();
+		Message(Chat::Red, "Bank page change failed; your bank is unchanged.");
+		return;
+	}
+	database.TransactionCommit();
+
+	// 3) repaint: clear the old page from memory + client, reload the new page, push it.
+	for (int16 s = EQ::invslot::BANK_BEGIN; s <= EQ::invslot::BANK_END; s++) {
+		if (m_inv[s]) {
+			DeleteItemInInventory(s, 0, true, false); // memory + client only; DB already holds new page
+		}
+	}
+
+	LoadBankSlotsFromInventory();
+
+	for (int16 s = EQ::invslot::BANK_BEGIN; s <= EQ::invslot::BANK_END; s++) {
+		const EQ::ItemInstance *inst = m_inv[s];
+		if (inst) {
+			SendItemPacket(s, inst, ItemPacketType::ItemPacketTrade);
+		}
+	}
+
+	m_bank_page       = new_page;
+	m_bank_page_count = new_count;
+
+	Message(Chat::White, "Bank page %d of %d.", m_bank_page, m_bank_page_count);
+}
+
 void Client::SaveDisciplines()
 {
 	std::vector<CharacterDisciplinesRepository::CharacterDisciplines> v;

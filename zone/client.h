@@ -984,6 +984,15 @@ public:
 		return (uint32) m_spellbook_volume * EQ::spells::SPELLBOOK_SIZE;
 	}
 
+	// Server-side limitless paged personal bank: the native 24-slot bank (slots 2000-2023 plus
+	// bag contents) is a window onto page N of unlimited storage. The active page lives in the
+	// `inventory` table; inactive pages are parked in `character_bank`. See client.cpp.
+	void SwapBankPage(int new_page);
+	void LoadBankPageState();          // load active_page / page_count at zone entry
+	void LoadBankSlotsFromInventory(); // rebuild the in-memory bank slots after a page load
+	inline int GetBankPage() const { return m_bank_page; }
+	inline int GetBankPageCount() const { return m_bank_page_count; }
+
 	// Bulk Scribe/Learn
 	uint16 ScribeSpells(uint8 min_level, uint8 max_level);
 	uint16 LearnDisciplines(uint8 min_level, uint8 max_level);
@@ -2218,6 +2227,8 @@ private:
 	bool m_lazy_load_bank            = false;
 	int  m_lazy_load_sent_bank_slots = 0;
 	int  m_spellbook_volume          = 0;   // active spellbook volume (server-side volumes)
+	int  m_bank_page                 = 0;   // active personal-bank page (limitless paged bank)
+	int  m_bank_page_count           = 1;   // number of bank pages that exist (>= 1)
 
 	glm::vec3 m_Proximity;
 

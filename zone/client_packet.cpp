@@ -360,6 +360,7 @@ void MapOpcodes()
 	ConnectedOpcodes[OP_SafePoint] = &Client::Handle_OP_SafePoint;
 	ConnectedOpcodes[OP_Save] = &Client::Handle_OP_Save;
 	ConnectedOpcodes[OP_SpellBookSwap] = &Client::Handle_OP_SpellBookSwap;
+	ConnectedOpcodes[OP_BankPageSwap] = &Client::Handle_OP_BankPageSwap;
 	ConnectedOpcodes[OP_SaveOnZoneReq] = &Client::Handle_OP_SaveOnZoneReq;
 	ConnectedOpcodes[OP_SelectTribute] = &Client::Handle_OP_SelectTribute;
 	ConnectedOpcodes[OP_SenseHeading] = &Client::Handle_OP_SenseHeading;
@@ -1359,6 +1360,7 @@ void Client::Handle_Connect_OP_ZoneEntry(const EQApplicationPacket *app)
 	// item loss will occur when they use the 'empty' slots, if this is not done
 	m_inv.SetGMInventory(true);
 	loaditems = database.GetInventory(this); /* Load Character Inventory */
+	LoadBankPageState(); /* akk-stack: which page the live bank rows represent (limitless paged bank) */
 	database.LoadCharacterBandolier(cid, &m_pp); /* Load Character Bandolier */
 	database.LoadCharacterBindPoint(cid, &m_pp); /* Load Character Bind */
 	database.LoadCharacterMaterialColor(cid, &m_pp); /* Load Character Material */
@@ -13804,6 +13806,35 @@ void Client::Handle_OP_SpellBookSwap(const EQApplicationPacket *app)
 		return;
 	}
 	SwapSpellbookVolume(target);
+}
+
+// akk-stack: limitless paged personal bank. The client-pack bank mod sends this custom packet when
+// the player pages the bank window. The 4-byte body is a SIGNED page delta relative to the server's
+// current page (+1 next / -1 prev), or the reset sentinel INT32_MIN meaning "go to the first page".
+// The mod sends the reset once, when the bank first opens after a client launch, so its page counter
+// (which always starts at 0) and our persisted active page line up even after a relog. Because the
+// server turns relative to its OWN authoritative page, a client whose counter has drifted can never
+// land on the wrong page. The #bankpage GM command drives SwapBankPage directly (absolute).
+void Client::Handle_OP_BankPageSwap(const EQApplicationPacket *app)
+{
+	if (!app || app->size < sizeof(int32)) {
+		return;
+	}
+	const int32 delta = *(int32 *) app->pBuffer;
+
+	// INT32_MIN written as a literal so it needs no extra header; matches the client mod's sentinel.
+	static const int32 reset_to_first = (-2147483647 - 1);
+
+	int target;
+	if (delta == reset_to_first) {
+		target = 0;
+	} else {
+		target = m_bank_page + (int) delta;
+		if (target < 0) {
+			target = 0;
+		}
+	}
+	SwapBankPage(target);
 }
 
 void Client::Handle_OP_SelectTribute(const EQApplicationPacket *app)
