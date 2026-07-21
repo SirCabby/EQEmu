@@ -781,6 +781,13 @@ Client::~Client() {
 	// will need this data right away
 	Save(2); // This fails when database destructor is called first on shutdown
 
+	// akk-stack limitless bank: on a REAL logout (not a zone), park the active page and pull page 0
+	// live so this character's next login opens the bank on page 1. After Save(2), so `inventory`
+	// already holds the live page. Skipped for zoning and for clients that never finished connecting.
+	if (!IsZoning() && ClientFinishedLoading()) {
+		ResetBankPageOnLogout();
+	}
+
 	safe_delete(task_state);
 	safe_delete(KarmaUpdateTimer);
 	safe_delete(GlobalChatLimiterTimer);
@@ -11779,7 +11786,7 @@ void Client::LoadBankSlotsFromInventory()
 	}
 }
 
-void Client::SwapBankPage(int new_page)
+void Client::SwapBankPage(int new_page, bool require_banker)
 {
 	// next/prev past an end is a silent no-op so a client page-turn stays put where it is.
 	if (new_page < 0 || new_page == m_bank_page) {
@@ -11792,12 +11799,16 @@ void Client::SwapBankPage(int new_page)
 		return;
 	}
 
-	// every bank interaction requires a nearby banker (mirrors OP_BankerChange / SwapItem).
-	uint32 distance = 0;
-	NPC   *banker   = entity_list.GetClosestBanker(this, distance);
-	if (!banker || distance > USE_NPC_RANGE2) {
-		Message(Chat::Red, "You must be near a banker to change bank pages.");
-		return;
+	// every bank interaction requires a nearby banker (mirrors OP_BankerChange / SwapItem) -- except
+	// the client's login-time sync reset (require_banker=false), which fires before the player has
+	// reached a banker, purely to line the server's page up with the freshly-launched client (page 0).
+	if (require_banker) {
+		uint32 distance = 0;
+		NPC   *banker   = entity_list.GetClosestBanker(this, distance);
+		if (!banker || distance > USE_NPC_RANGE2) {
+			Message(Chat::Red, "You must be near a banker to change bank pages.");
+			return;
+		}
 	}
 
 	const uint32      char_id  = CharacterID();
@@ -11869,7 +11880,65 @@ void Client::SwapBankPage(int new_page)
 	m_bank_page       = new_page;
 	m_bank_page_count = new_count;
 
-	Message(Chat::White, "Bank page %d of %d.", m_bank_page, m_bank_page_count);
+	// User-facing feedback only for real (banker) page turns and #bankpage; the silent login reset
+	// (require_banker=false) must not spam "Bank page 0 of N" into chat on every login.
+	if (require_banker) {
+		Message(Chat::White, "Bank page %d of %d.", m_bank_page, m_bank_page_count);
+	}
+}
+
+// akk-stack limitless bank: park the live bank page back to storage and pull page 0 live, at REAL
+// logout only (camp/quit/LD -- not a zone), so this character's next login opens the bank on page 1.
+// This is the robust, server-authoritative half of "open at page 1 on relaunch": the client cannot
+// self-reset at login because OP_BankPageSwap is a connected-state opcode (a reset sent during the
+// zone-in handshake is dropped). Pure DB -- called from ~Client AFTER the final Save(2), so
+// `inventory` already holds the live page and there is no in-memory state or client packet to update.
+// No-ops when already on page 0.
+void Client::ResetBankPageOnLogout()
+{
+	const uint32 char_id = CharacterID();
+	if (char_id == 0) {
+		return;
+	}
+
+	auto state = database.QueryDatabase(fmt::format(
+		"SELECT active_page FROM character_bank_state WHERE character_id = {}", char_id));
+	if (!state.Success() || state.RowCount() == 0) {
+		return;
+	}
+	const int active_page = Strings::ToInt(state.begin()[0]);
+	if (active_page <= 0) {
+		return; // already on the first page -- nothing to shuffle
+	}
+
+	const std::string where = BankRowsWhere(char_id);
+
+	database.TransactionBegin();
+	bool ok  = true;
+	auto run = [&](const std::string &sql) {
+		if (ok && !database.QueryDatabase(sql).Success()) {
+			ok = false;
+		}
+	};
+
+	// park the live page, pull page 0 into `inventory`, and mark page 0 active (mirrors SwapBankPage's
+	// DB transaction, hardcoded to page 0 and without the memory reload / client repaint).
+	run(fmt::format(
+		"INSERT INTO character_bank (page, {}) SELECT {}, {} FROM inventory WHERE {}",
+		bank_page_columns, active_page, bank_page_columns, where));
+	run(fmt::format("DELETE FROM inventory WHERE {}", where));
+	run(fmt::format(
+		"INSERT INTO inventory ({}) SELECT {} FROM character_bank WHERE character_id = {} AND page = 0",
+		bank_page_columns, bank_page_columns, char_id));
+	run(fmt::format("DELETE FROM character_bank WHERE character_id = {} AND page = 0", char_id));
+	run(fmt::format("UPDATE character_bank_state SET active_page = 0 WHERE character_id = {}", char_id));
+
+	if (!ok) {
+		database.TransactionRollback();
+		LogError("[ResetBankPageOnLogout] failed for character [{}]", char_id);
+		return;
+	}
+	database.TransactionCommit();
 }
 
 void Client::SaveDisciplines()

@@ -987,7 +987,8 @@ public:
 	// Server-side limitless paged personal bank: the native 24-slot bank (slots 2000-2023 plus
 	// bag contents) is a window onto page N of unlimited storage. The active page lives in the
 	// `inventory` table; inactive pages are parked in `character_bank`. See client.cpp.
-	void SwapBankPage(int new_page);
+	void SwapBankPage(int new_page, bool require_banker = true);
+	void ResetBankPageOnLogout();      // park live page + pull page 0 at real logout (next login = page 1)
 	void LoadBankPageState();          // load active_page / page_count at zone entry
 	void LoadBankSlotsFromInventory(); // rebuild the in-memory bank slots after a page load
 	inline int GetBankPage() const { return m_bank_page; }

@@ -13825,14 +13825,18 @@ void Client::Handle_OP_BankPageSwap(const EQApplicationPacket *app)
 	// INT32_MIN written as a literal so it needs no extra header; matches the client mod's sentinel.
 	static const int32 reset_to_first = (-2147483647 - 1);
 
-	int target;
 	if (delta == reset_to_first) {
+		// Login-time sync reset from the client mod (sent once per launch, before the player reaches
+		// a banker) so the freshly-launched client's page counter (0) and our persisted active page
+		// line up -- the bank then opens on page 1 with a correct label, no click. No banker required,
+		// and it silently no-ops when already on page 0.
+		SwapBankPage(0, false);
+		return;
+	}
+
+	int target = m_bank_page + (int) delta;
+	if (target < 0) {
 		target = 0;
-	} else {
-		target = m_bank_page + (int) delta;
-		if (target < 0) {
-			target = 0;
-		}
 	}
 	SwapBankPage(target);
 }
