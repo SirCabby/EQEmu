@@ -6878,7 +6878,7 @@ namespace RoF2
 		//unknown18;	//Power Source Capacity or evolve filename?
 		//evolve_string; // Some String, but being evolution related is just a guess
 
-		iqbs.Heirloom = 0;
+		iqbs.Heirloom = item->Heirloom ? 1 : 0;
 		iqbs.Placeable = 0;
 		iqbs.unknown28 = -1;
 		iqbs.unknown29 = packet_type == ItemPacketInvalid ? 0xFF : 0;

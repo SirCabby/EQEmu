@@ -931,6 +931,32 @@ bool EQ::ItemInstance::IsDroppable(bool recurse) const
 	return true;
 }
 
+// Heirloom items may enter the shared bank even when NoDrop or attuned
+bool EQ::ItemInstance::IsSharedBankEligible(bool recurse) const
+{
+	if (!m_item) {
+		return false;
+	}
+
+	if (!m_item->Heirloom && !IsDroppable(false)) {
+		return false;
+	}
+
+	if (recurse) {
+		for (auto iter: m_contents) {
+			if (!iter.second) {
+				continue;
+			}
+
+			if (!iter.second->IsSharedBankEligible(recurse)) {
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
 void EQ::ItemInstance::Initialize(SharedDatabase *db) {
 	// if there's no actual item, don't do anything
 	if (!m_item) {

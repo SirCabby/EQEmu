@@ -201,6 +201,7 @@ namespace EQ
 		bool IsSlotAllowed(int16 slot_id) const;
 
 		bool IsDroppable(bool recurse = true) const;
+		bool IsSharedBankEligible(bool recurse = true) const;
 
 		bool IsScaling() const				{ return m_scaling; }
 		uint32 GetExp() const				{ return m_exp; }

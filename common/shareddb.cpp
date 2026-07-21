@@ -988,6 +988,7 @@ void SharedDatabase::LoadItems(void *data, uint32 size, int32 items, uint32 max_
 		item.Attuneable      = !disable_attuneable && e.attuneable;
 		item.BenefitFlag     = e.benefitflag;
 		item.FVNoDrop        = e.fvnodrop;
+		item.Heirloom        = e.heirloom != 0;
 		item.Magic           = e.magic;
 		item.NoDrop          = disable_no_drop ? std::numeric_limits<uint8>::max() : e.nodrop;
 		item.NoPet           = !disable_no_pet && e.nopet;

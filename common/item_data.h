@@ -375,6 +375,7 @@ namespace EQ
 		bool	ArtifactFlag {};
 		bool	SummonedFlag {};
 		uint8	FVNoDrop {};		// Firiona Vie nodrop flag
+		bool	Heirloom {};		// Heirloom: NoDrop item may still enter the shared bank
 		uint32	Favor {};			// Individual favor
 		uint32	GuildFavor {};		// Guild favor
 		uint32	PointType {};
