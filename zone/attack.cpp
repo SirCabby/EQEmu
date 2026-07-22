@@ -23,6 +23,7 @@
 #include "common/rulesys.h"
 #include "common/spdat.h"
 #include "common/strings.h"
+#include "zone/advloot_roll.h"
 #include "zone/bot.h"
 #include "zone/fastmath.h"
 #include "zone/lua_parser.h"
@@ -2918,6 +2919,227 @@ bool NPC::Death(Mob* killer_mob, int64 damage, uint16 spell, EQ::skills::SkillTy
 			Mob* ultimate_owner = killer_mob->GetUltimateOwner();
 			if (ultimate_owner->IsClient()) {
 				corpse->AllowPlayerLoot(ultimate_owner, 0);
+			}
+		}
+
+		// akk-stack Advanced Looting: hand the corpse's coin straight to the looter(s) (no need to open
+		// the corpse) and push its drops to EVERY eligible looter's advloot window via the OP_Marquee
+		// carrier. The eligible set mirrors the allowed-looter rules applied just above (solo killer /
+		// whole group / raid per RaidLootType) so each player only sees what they may actually loot.
+		if (killer && killer->IsClient() && corpse) {
+			Client               *adv_killer = killer->CastToClient();
+			Group                *adv_group  = adv_killer->GetGroup();
+			Raid                 *adv_raid   = adv_killer->GetRaid();
+			std::vector<Client *> adv_looters;
+
+			if (adv_group) {
+				// EVERY member sees the drop list; only the controller gets Loot/Give (flagged below)
+				for (const auto &adv_m : adv_group->members) {
+					if (adv_m && adv_m->IsClient()) {
+						adv_looters.push_back(adv_m->CastToClient());
+					}
+				}
+			}
+			else if (adv_raid) {
+				for (const auto &adv_m : adv_raid->members) {
+					if (adv_m.is_bot || !adv_m.member) {
+						continue;
+					}
+					bool adv_ok = false;
+					switch (adv_raid->GetLootType()) {
+						case RaidLootType::LeaderOnly:
+							adv_ok = adv_m.is_raid_leader;
+							break;
+						case RaidLootType::LeaderAndGroupLeadersOnly:
+							adv_ok = (adv_m.is_raid_leader || adv_m.is_group_leader);
+							break;
+						case RaidLootType::LeaderSelected:
+							adv_ok = adv_m.is_looter;
+							break;
+						case RaidLootType::EntireRaid:
+						default:
+							adv_ok = true;
+							break;
+					}
+					if (adv_ok) {
+						adv_looters.push_back(adv_m.member);
+					}
+				}
+			}
+			if (adv_looters.empty()) {
+				adv_looters.push_back(adv_killer); // solo kill
+			}
+
+			// coin: grant it immediately (group auto-split when enabled), mirroring the native
+			// MakeLootRequestPackets coin path, then clear it so opening the corpse can't double-pay.
+			if (corpse->GetCopper() || corpse->GetSilver() || corpse->GetGold() || corpse->GetPlatinum()) {
+				const uint32 adv_cp = corpse->GetCopper();
+				const uint32 adv_sp = corpse->GetSilver();
+				const uint32 adv_gp = corpse->GetGold();
+				const uint32 adv_pp = corpse->GetPlatinum();
+
+				if (adv_group && adv_killer->AutoSplitEnabled()) {
+					// SplitMoney already tells each member what they received
+					adv_group->SplitMoney(adv_cp, adv_sp, adv_gp, adv_pp, adv_killer);
+				}
+				else {
+					// update_client=true is REQUIRED here: it defaults to false, which adds the coin to
+					// the profile but never tells the client (the native loot path gets away with it
+					// because it also sends OP_MoneyOnCorpse). Group::SplitMoney already passes true.
+					adv_killer->AddMoneyToPP(adv_cp, adv_sp, adv_gp, adv_pp, true);
+					adv_killer->Message(
+						Chat::MoneySplit,
+						"You receive %s from the corpse.",
+						Strings::Money(adv_pp, adv_gp, adv_sp, adv_cp).c_str()
+					);
+				}
+				corpse->RemoveCash();
+				corpse->Save();
+			}
+
+			// Give every drop a stable, per-corpse-unique id up front: equip_slot is -1 for almost all
+			// NPC loot, so it cannot tell two drops apart -- adv_uid can.
+			corpse->AdvAssignUids();
+
+			// Every drop auto-enters a Need/Greed roll (no "start roll" step). Collect, per item (keyed
+			// by adv_uid), the set of looters who can actually SEE it (their never-list doesn't hide it)
+			// so the roll is opened against exactly that audience below.
+			struct AdvRollSeed {
+				uint32              item_id = 0;
+				std::string         name;
+				std::vector<uint32> eligible;
+			};
+			std::map<uint32, AdvRollSeed> adv_roll_seed;
+
+			// Saved per-item actions to auto-apply once the rolls are open: (looter, adv_uid, vote).
+			struct AdvAutoCast {
+				Client                  *looter = nullptr;
+				uint32                   adv_uid = 0;
+				AdvLootRollManager::Vote vote    = AdvLootRollManager::VoteNeed;
+			};
+			std::vector<AdvAutoCast> adv_autocasts;
+
+			const uint16      adv_cid       = corpse->GetID();
+			const std::string adv_corpsenom = corpse->GetCleanName(); // shown per row, clickable to target
+			for (auto adv_looter : adv_looters) {
+				if (!adv_looter) {
+					continue;
+				}
+
+				// Each looter has their own saved item preferences (character_loot_never): mode 0 = never
+				// (hide + auto-out of the roll), 1 = always need, 2 = always greed, 3 = none (a row that
+				// exists only for the sell flag). `sell` = auto-sell the item when looted (orthogonal).
+				std::map<uint32, uint8> adv_pref; // item_id -> mode
+				std::map<uint32, uint8> adv_sell; // item_id -> sell flag
+				{
+					auto adv_pr = database.QueryDatabase(
+						"SELECT `item_id`, `mode`, `sell` FROM `character_loot_never` WHERE `character_id` = " +
+						std::to_string(adv_looter->CharacterID())
+					);
+					for (auto adv_row : adv_pr) {
+						const uint32 iid = (uint32) atoi(adv_row[0]);
+						adv_pref[iid] = (uint8) atoi(adv_row[1]);
+						adv_sell[iid] = (uint8) atoi(adv_row[2]);
+					}
+				}
+
+				// Header flag: may THIS player act on the list? Controller = the delegated Master
+				// Looter when the group has one, else the group leader. Solo/raid = yes.
+				// Non-controllers still get the full list -- just without Loot/Give (locked out).
+				const bool adv_can_loot = adv_group ? adv_group->IsLootController(adv_looter) : true;
+
+				// Header is a bit-packed flag: bit0 = may this player act on the list (controller/solo),
+				// bit1 = is this player grouped (so the client can hide the Give/Lock group controls solo).
+				const int   adv_hdr = (adv_can_loot ? 1 : 0) | (adv_group ? 2 : 0);
+				std::string adv_msg = "ALW1|" + std::to_string(adv_hdr);
+				int         adv_count = 0;
+				for (auto adv_li : corpse->GetLootItems()) {
+					if (!adv_li || !adv_li->item_id) {
+						continue;
+					}
+					const auto  adv_pit  = adv_pref.find(adv_li->item_id);
+					const bool  adv_has  = (adv_pit != adv_pref.end());
+					const uint8 adv_mode = adv_has ? adv_pit->second : 0;
+					if (adv_has && adv_mode == 0) {
+						continue; // never: hide it and leave this looter out of its roll entirely
+					}
+					const EQ::ItemData *adv_item = database.GetItem(adv_li->item_id);
+					if (!adv_item) {
+						continue;
+					}
+					// record = "<corpse_id>,<adv_uid>,<item_id>,<pref>,<sell>,<icon>,<value>,<corpse>,<name>"
+					// (name LAST so it may hold commas; corpse names have none). pref = this looter's saved
+					// roll action (255 none / 0 never-not-listed / 1 need / 2 greed / 3 none). sell = 1 if
+					// "always sell" is set. value = merchant price in copper.
+					const uint8 adv_sflag = (adv_has && adv_sell.count(adv_li->item_id)) ? adv_sell[adv_li->item_id] : 0;
+					adv_msg += "|";
+					adv_msg += std::to_string(adv_cid);
+					adv_msg += ",";
+					adv_msg += std::to_string((unsigned) adv_li->adv_uid);
+					adv_msg += ",";
+					adv_msg += std::to_string((unsigned) adv_li->item_id);
+					adv_msg += ",";
+					adv_msg += std::to_string((unsigned) (adv_has ? adv_mode : 255));
+					adv_msg += ",";
+					adv_msg += std::to_string((unsigned) adv_sflag);
+					adv_msg += ",";
+					adv_msg += std::to_string((unsigned) adv_item->Icon);
+					adv_msg += ",";
+					adv_msg += std::to_string((unsigned) adv_item->Price);
+					adv_msg += ",";
+					adv_msg += adv_corpsenom;
+					adv_msg += ",";
+					adv_msg += adv_item->Name;
+
+					// this looter can see the item -> they're in its roll audience
+					AdvRollSeed &adv_seed = adv_roll_seed[adv_li->adv_uid];
+					adv_seed.item_id      = adv_li->item_id;
+					adv_seed.name         = adv_item->Name;
+					adv_seed.eligible.push_back(adv_looter->CharacterID());
+
+					// a saved always-need / always-greed fires automatically once the roll is open
+					if (adv_has && (adv_mode == 1 || adv_mode == 2)) {
+						adv_autocasts.push_back({
+							adv_looter,
+							adv_li->adv_uid,
+							adv_mode == 1 ? AdvLootRollManager::VoteNeed : AdvLootRollManager::VoteGreed
+						});
+					}
+
+					if (++adv_count >= 20) {
+						break;
+					}
+				}
+				if (adv_count > 0) {
+					adv_looter->SendMarqueeMessage(0, adv_msg, 1000);
+					// grouped: also push the Looter dropdown's roster/controller for this window
+					if (adv_group) {
+						adv_group->SendAdvLootLooterList(adv_looter);
+					}
+				}
+			}
+
+			// LOCKED = rolling mode (grouped default): members roll Need/Greed/Pass and it auto-resolves;
+			// direct Loot/Sell + the native corpse are blocked for non-controllers. UNLOCKED = free-for-all
+			// (solo, or the leader unlocked it): anyone eligible Loots/Sells directly. Grouped drops open
+			// LOCKED; solo drops open unlocked. Saved always-need/greed still auto-cast below.
+			const bool adv_lock = (adv_group != nullptr);
+			for (auto &adv_kv : adv_roll_seed) {
+				adv_loot_rolls.Open(
+					adv_cid,
+					adv_kv.first,
+					adv_kv.second.item_id,
+					adv_kv.second.name,
+					adv_kv.second.eligible,
+					adv_lock
+				);
+			}
+
+			// Now that every roll is open, fire each looter's saved always-need / always-greed. This
+			// runs the same for solo and grouped play: a preferred item a solo killer auto-needs simply
+			// resolves to them at once. Items with no saved action are left for the player to decide.
+			for (auto &adv_ac : adv_autocasts) {
+				adv_loot_rolls.Cast(adv_ac.looter, adv_cid, adv_ac.adv_uid, adv_ac.vote);
 			}
 		}
 

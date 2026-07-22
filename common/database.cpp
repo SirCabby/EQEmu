@@ -1232,6 +1232,26 @@ std::string Database::GetGroupLeaderName(uint32 group_id)
 	return row[0];
 }
 
+// akk-stack Advanced Looting: read back the group's delegated Master Looter. Stored like the stock
+// leadership roles (a member name on the group_leaders row) so it persists across zones.
+std::string Database::GetGroupMasterLooterName(uint32 group_id)
+{
+	const std::string& query = fmt::format(
+		"SELECT `looter` FROM `group_leaders` WHERE `gid` = {}",
+		group_id
+	);
+
+	auto results = QueryDatabase(query);
+
+	if (!results.Success() || !results.RowCount()) {
+		return std::string();
+	}
+
+	auto& row = results.begin();
+
+	return row[0] ? std::string(row[0]) : std::string();
+}
+
 char* Database::GetGroupLeadershipInfo(
 	uint32 group_id,
 	char* leaderbuf,

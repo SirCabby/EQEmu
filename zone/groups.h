@@ -32,7 +32,8 @@ enum {
 	RoleAssist = 1,
 	RoleTank   = 2,
 	RolePuller = 4,
-	RoleLeader = 8
+	RoleLeader = 8,
+	RoleLooter = 16 // akk-stack Advanced Looting: Master Looter (no stock RoF2 equivalent)
 };
 
 class GroupIDConsumer {
@@ -94,6 +95,28 @@ public:
 	void	MemberZoned(Mob* removemob);
 	bool	IsLeader(const char* name);
 	inline bool IsLeader(Mob* m) { return m == leader; };
+
+	// akk-stack Advanced Looting: who may actually take / hand out this group's drops. EVERY member is
+	// shown the full drop list; only the "loot controller" gets Loot/Give controls -- the Master Looter
+	// when the leader has delegated that role, otherwise the group leader.
+	//
+	// Master Looter is a real group leadership role -- a 4th one alongside Main Tank / Main Assist /
+	// Puller. It is tracked in MemberRoles and persisted to `group_leaders`.`looter` exactly like the
+	// stock roles, so a delegation survives zoning (a Group is per-zone and rebuilt from that table).
+	// RoF2 has no native looter role, so there is no stock client UI for it: it is delegated with
+	// `/advloot ml` and announced to the group as chat text rather than an OP_GroupRoles packet
+	// (which would carry a RoleNumber this client does not understand).
+	void	DelegateMasterLooter(const char *NewMasterLooterName, uint8 toggle = 0);
+	void	UnDelegateMasterLooter(const char *OldMasterLooterName, uint8 toggle = 0);
+	void	NotifyMasterLooter(Client *c, uint8 toggle = 0);
+	void	SetMasterLooter(const char *NewMasterLooterName);
+	const char *GetMasterLooterName() { return MasterLooterName.c_str(); }
+	bool	AmIMasterLooter(const char *mob_name);
+	bool	IsLootController(Mob *m);
+	// akk-stack Advanced Looting: push `to` the group roster + current controller for the Looter
+	// dropdown (carrier message "ALWg|<is_leader>|<ml_name>|<member>|..."; leader-first roster).
+	void	SendAdvLootLooterList(Client *to);
+	void	SendAdvLootLooterListAll(); // push it to every in-zone client member (roster changed)
 	uint8	GroupCount();
 	uint32	GetHighestLevel();
 	uint32	GetLowestLevel();
@@ -180,6 +203,7 @@ private:
 	std::string	MainTankName;
 	std::string	MainAssistName;
 	std::string	PullerName;
+	std::string	MasterLooterName; // akk-stack Advanced Looting: the delegated Master Looter
 	std::string	NPCMarkerName;
 	uint16	NPCMarkerID;
 	uint16	AssistTargetID;

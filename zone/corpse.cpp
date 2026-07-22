@@ -29,6 +29,7 @@
 #include "zone/bot.h"
 #include "zone/dynamic_zone.h"
 #include "zone/entity.h"
+#include "zone/advloot_roll.h"
 #include "zone/groups.h"
 #include "zone/mob.h"
 #include "zone/queryserv.h"
@@ -38,6 +39,7 @@
 #include "zone/worldserver.h"
 
 #include <iostream>
+#include <set>
 
 using json = nlohmann::json;
 
@@ -927,6 +929,171 @@ void Corpse::RemoveItem(LootItem *item_data)
 	}
 }
 
+// akk-stack Advanced Looting: move one item from this (NPC) corpse straight into the player's inventory
+// -- no proximity check, no native loot window. Driven by the advloot window's Loot button
+// (Client::Handle_OP_AdvLootAction). The item is identified by its LootItem::adv_uid (stable and
+// unique per corpse -- equip_slot is -1 for nearly every drop). Mirrors the item-instance +
+// inventory-put + removal core of Corpse::LootCorpseItem.
+bool Corpse::AdvLootItem(Client *c, uint32 adv_uid)
+{
+	if (!c) {
+		return false;
+	}
+
+	LootItem *item_data = nullptr;
+	for (const auto &li : m_item_list) {
+		if (li && li->adv_uid == adv_uid) {
+			item_data = li;
+			break;
+		}
+	}
+	if (!item_data) {
+		return false;
+	}
+
+	const EQ::ItemData *item = database.GetItem(item_data->item_id);
+	if (!item) {
+		return false;
+	}
+
+	auto              timestamps = database.GetItemRecastTimestamps(c->CharacterID());
+	EQ::ItemInstance *inst       = database.CreateItem(
+		item,
+		item_data->charges,
+		item_data->aug_1,
+		item_data->aug_2,
+		item_data->aug_3,
+		item_data->aug_4,
+		item_data->aug_5,
+		item_data->aug_6,
+		item_data->attuned,
+		item_data->custom_data,
+		item_data->ornamenticon,
+		item_data->ornamentidfile,
+		item_data->ornament_hero_model
+	);
+	if (!inst) {
+		return false;
+	}
+
+	if (item->RecastDelay) {
+		if (item->RecastType != RECAST_TYPE_UNLINKED_ITEM) {
+			inst->SetRecastTimestamp(timestamps.count(item->RecastType) ? timestamps.at(item->RecastType) : 0);
+		}
+		else {
+			inst->SetRecastTimestamp(timestamps.count(item->ID) ? timestamps.at(item->ID) : 0);
+		}
+	}
+
+	// akk-stack Advanced Looting: if this player set "always sell" for the item, convert it straight to
+	// its merchant price instead of putting it in a bag (no merchant needed -- just the item's Price).
+	bool adv_auto_sold = false;
+	{
+		auto adv_rs = database.QueryDatabase(fmt::format(
+			"SELECT `sell` FROM `character_loot_never` WHERE `character_id` = {} AND `item_id` = {}",
+			c->CharacterID(), item_data->item_id
+		));
+		if (adv_rs.Success() && adv_rs.RowCount() && atoi(adv_rs.begin()[0]) != 0) {
+			adv_auto_sold = true;
+		}
+	}
+
+	if (adv_auto_sold) {
+		const uint32 price = item->Price;
+		c->AddMoneyToPP(price % 10, (price / 10) % 10, (price / 100) % 10, price / 1000, true);
+		c->Message(
+			Chat::MoneySplit, "[AdvLoot] Auto-sold %s for %s.", item->Name,
+			Strings::Money(price / 1000, (price / 100) % 10, (price / 10) % 10, price % 10).c_str()
+		);
+	}
+	else if (!c->AutoPutLootInInventory(*inst, true, true, nullptr)) {
+		c->PutLootInInventory(EQ::invslot::slotCursor, *inst, nullptr);
+	}
+
+	if (m_corpse_db_id) {
+		database.DeleteItemOffCharacterCorpse(m_corpse_db_id, item_data->equip_slot, item_data->item_id);
+	}
+	RemoveItem(item_data);
+
+	if (!adv_auto_sold) {
+		EQ::SayLinkEngine linker;
+		linker.SetLinkType(EQ::saylink::SayLinkItemInst);
+		linker.SetItemInst(inst);
+		linker.GenerateLink();
+		c->MessageString(Chat::Loot, LOOTED_MESSAGE, linker.Link().c_str());
+	}
+
+	safe_delete(inst);
+	return true;
+}
+
+// akk-stack Advanced Looting: one-time "Sell" of a corpse drop -- remove it and pay the player its
+// merchant price immediately (no merchant, no inventory). Keyed on adv_uid like AdvLootItem.
+bool Corpse::AdvSellItem(Client *c, uint32 adv_uid)
+{
+	if (!c) {
+		return false;
+	}
+
+	LootItem *item_data = nullptr;
+	for (const auto &li : m_item_list) {
+		if (li && li->adv_uid == adv_uid) {
+			item_data = li;
+			break;
+		}
+	}
+	if (!item_data) {
+		return false;
+	}
+
+	const EQ::ItemData *item = database.GetItem(item_data->item_id);
+	if (!item) {
+		return false;
+	}
+
+	const uint32 price = item->Price;
+	c->AddMoneyToPP(price % 10, (price / 10) % 10, (price / 100) % 10, price / 1000, true);
+	c->Message(
+		Chat::MoneySplit, "[AdvLoot] Sold %s for %s.", item->Name,
+		Strings::Money(price / 1000, (price / 100) % 10, (price / 10) % 10, price % 10).c_str()
+	);
+
+	if (m_corpse_db_id) {
+		database.DeleteItemOffCharacterCorpse(m_corpse_db_id, item_data->equip_slot, item_data->item_id);
+	}
+	RemoveItem(item_data);
+	return true;
+}
+
+// akk-stack Advanced Looting: number this corpse's drops 1..N so each has a stable, unique handle for
+// the advloot window and roll sessions. Idempotent -- only touches items still at 0, so re-walking the
+// corpse (e.g. a second looter's push) keeps the ids already handed out.
+void Corpse::AdvAssignUids()
+{
+	uint32 next = 0;
+	for (const auto &li : m_item_list) {
+		if (li && li->adv_uid > next) {
+			next = li->adv_uid;
+		}
+	}
+	for (const auto &li : m_item_list) {
+		if (li && li->adv_uid == 0) {
+			li->adv_uid = ++next;
+		}
+	}
+}
+
+uint32 Corpse::AdvItemId(uint32 adv_uid) const
+{
+	for (const auto &li : m_item_list) {
+		if (li && li->adv_uid == adv_uid) {
+			return li->item_id;
+		}
+	}
+
+	return 0;
+}
+
 void Corpse::RemoveItemByID(uint32 item_id, int quantity)
 {
 	if (!database.GetItem(item_id)) {
@@ -1174,6 +1341,18 @@ void Corpse::MakeLootRequestPackets(Client *c, const EQApplicationPacket *app)
 	if (m_being_looted_by_entity_id != 0xFFFFFFFF && m_being_looted_by_entity_id != c->GetID()) {
 		SendLootReqErrorPacket(c, LootResponse::SomeoneElse);
 		return;
+	}
+
+	// akk-stack Advanced Looting: if the master looter has LOCKED any of this corpse's advloot drops,
+	// only the group's loot controller may open the corpse -- other members are blocked from the native
+	// loot window too, matching the advloot lock.
+	if (adv_loot_rolls.CorpseHasLock(GetID()) && c->Admin() < AccountStatus::GMAdmin) {
+		Group *adv_g = c->GetGroup();
+		if (!(adv_g && adv_g->IsLootController(c))) {
+			SendLootReqErrorPacket(c, LootResponse::SomeoneElse);
+			c->Message(Chat::Yellow, "[AdvLoot] This corpse's loot is locked by the master looter.");
+			return;
+		}
 	}
 
 	// all loot session disqualifiers should occur before this point as not to interfere with any current looter

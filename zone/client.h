@@ -1030,6 +1030,11 @@ public:
 	virtual void UpdateEquipmentLight() { m_Light.Type[EQ::lightsource::LightEquipment] = m_inv.FindBrightestLightType(); m_Light.Level[EQ::lightsource::LightEquipment] = EQ::lightsource::TypeToLevel(m_Light.Type[EQ::lightsource::LightEquipment]); }
 
 	inline bool AutoSplitEnabled() { return m_pp.autosplit != 0; }
+	// akk-stack Advanced Looting: this player opted OUT of receiving coin auto-split (Deny Autosplit).
+	// In-memory (per zone session); Group::SplitMoney skips deniers so their share is divided among the
+	// members who still want it.
+	inline bool AdvLootDeniesSplit() const { return m_advloot_deny_split; }
+	inline void SetAdvLootDeniesSplit(bool deny) { m_advloot_deny_split = deny; }
 	inline bool AutoConsentGroupEnabled() const { return m_pp.groupAutoconsent != 0; }
 	inline bool AutoConsentRaidEnabled() const { return m_pp.raidAutoconsent != 0; }
 	inline bool AutoConsentGuildEnabled() const { return m_pp.guildAutoconsent != 0; }
@@ -2304,6 +2309,7 @@ private:
 
 	EQ::versions::ClientVersion m_ClientVersion;
 	uint32 m_ClientVersionBit;
+	bool m_advloot_deny_split = false; // akk-stack Advanced Looting: opted out of coin auto-split
 
 	int XPRate;
 

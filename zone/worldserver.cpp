@@ -1244,6 +1244,8 @@ void WorldServer::HandleMessage(uint16 opcode, const EQ::Net::Packet &p)
 				group->SetMainTank(MainTankName);
 				group->SetMainAssist(AssistName);
 				group->SetPuller(PullerName);
+				// akk-stack Advanced Looting: restore the delegated Master Looter role too
+				group->SetMasterLooter(database.GetGroupMasterLooterName(group->GetID()).c_str());
 				group->SetNPCMarker(NPCMarkerName);
 				group->SetGroupAAs(&GLAA);
 				group->SetGroupMentor(mentor_percent, mentoree_name);

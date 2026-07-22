@@ -197,6 +197,10 @@ public:
 		GroupLeadershipAA_Struct* GLAA = nullptr
 	);
 	std::string GetGroupLeaderName(uint32 group_id);
+	// akk-stack Advanced Looting: the group's delegated Master Looter (a 4th group leadership role).
+	// Deliberately its own small query rather than another out-param threaded through the three
+	// GetGroupLeadershipInfo() overloads and the generated group_leaders repository (upstream-owned).
+	std::string GetGroupMasterLooterName(uint32 group_id);
 	uint32 GetGroupID(const std::string& name);
 	void ClearGroup(uint32 group_id = 0);
 	void ClearGroupLeader(uint32 group_id = 0);

@@ -294,6 +294,7 @@
 	void Handle_OP_SaveOnZoneReq(const EQApplicationPacket *app);
 	void Handle_OP_SpellBookSwap(const EQApplicationPacket *app);
 	void Handle_OP_BankPageSwap(const EQApplicationPacket *app);
+	void Handle_OP_AdvLootAction(const EQApplicationPacket *app);
 	void Handle_OP_SelectTribute(const EQApplicationPacket *app);
 	void Handle_OP_SenseHeading(const EQApplicationPacket *app);
 	void Handle_OP_SenseTraps(const EQApplicationPacket *app);

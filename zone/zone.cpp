@@ -40,6 +40,7 @@
 #include "common/seperator.h"
 #include "common/serverinfo.h"
 #include "common/strings.h"
+#include "zone/advloot_roll.h"
 #include "zone/dynamic_zone.h"
 #include "zone/guild_mgr.h"
 #include "zone/map.h"
@@ -1520,6 +1521,8 @@ uint32 Zone::CountAuth() {
 
 bool Zone::Process() {
 	spawn_conditions.Process();
+
+	adv_loot_rolls.Process(); // akk-stack Advanced Looting: tick Need/Greed roll countdowns
 
 	if (spawn2_timer.Check()) {
 		LinkedListIterator<Spawn2 *> iterator(spawn2_list);

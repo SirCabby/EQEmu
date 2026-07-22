@@ -130,22 +130,28 @@ void Group::SplitMoney(uint32 copper, uint32 silver, uint32 gold, uint32 platinu
 		return;
 	}
 
-	// find number of clients in group and check if splitter is in group
-
-	uint8 member_count      = 0;
-	bool  splitter_in_group = false;
+	// find the clients eligible to receive a share and check the splitter is in the group.
+	// akk-stack Advanced Looting: a member who chose "Deny Autosplit" is skipped -- their share is
+	// divided among the members who still want coin, and they can never be the remainder recipient.
+	std::vector<Client *> eligible;
+	bool                  splitter_in_group = false;
 
 	for (uint32 i = 0; i < MAX_GROUP_MEMBERS; i++) {
 		// Don't split with Mercs or Bots
 		if (members[i] && members[i]->IsClient()) {
-			member_count++;
-			if (members[i]->CastToClient() == splitter) {
+			Client *mc = members[i]->CastToClient();
+			if (mc == splitter) {
 				splitter_in_group = true;
+			}
+			if (!mc->AdvLootDeniesSplit()) {
+				eligible.push_back(mc);
 			}
 		}
 	}
 
-	// Return if no group members found.
+	const uint8 member_count = (uint8) eligible.size();
+
+	// Return if no eligible members found.
 	if (!member_count) {
 		return;
 	}
@@ -167,11 +173,9 @@ void Group::SplitMoney(uint32 copper, uint32 silver, uint32 gold, uint32 platinu
 	uint32 platinum_split     = platinum / member_count;
 	uint32 platinum_remainder = platinum % member_count;
 
-	// Loop through the group members to split the coins.
-	for (const auto &m: members) {
-		if (m && m->IsClient()) {
-			Client *member_client = m->CastToClient();
-
+	// Loop through the eligible members to split the coins.
+	for (Client *member_client : eligible) {
+		{
 			uint32 receive_copper   = copper_split;
 			uint32 receive_silver   = silver_split;
 			uint32 receive_gold     = gold_split;
@@ -179,7 +183,7 @@ void Group::SplitMoney(uint32 copper, uint32 silver, uint32 gold, uint32 platinu
 
 			// if /split is used then splitter gets the remainder + split.
 			// if /autosplit is used then random players in the group will get the remainder + split.
-			if(share ? member_client == splitter : member_client == members[random_member]) {
+			if(share ? member_client == splitter : member_client == eligible[random_member]) {
 				receive_copper   += copper_remainder;
 				receive_silver   += silver_remainder;
 				receive_gold     += gold_remainder;
@@ -361,6 +365,8 @@ bool Group::AddMember(Mob* new_member, std::string new_member_name, uint32 chara
 	if (RuleB(Bots, Enabled)) {
 		Bot::UpdateGroupCastingRoles(this);
 	}
+
+	SendAdvLootLooterListAll(); // roster grew -> refresh everyone's Looter dropdown
 
 	return true;
 }
@@ -751,6 +757,13 @@ bool Group::DelMember(Mob* oldmember, bool ignoresender)
 
 	safe_delete(outapp);
 
+	// oldmember is already out of members[] (above), so refresh the remaining members' Looter dropdowns
+	// and clear the departing member's (they are no longer grouped).
+	SendAdvLootLooterListAll();
+	if (oldmember->IsClient()) {
+		oldmember->CastToClient()->SendMarqueeMessage(0, "ALWg|0", 1000);
+	}
+
 	if(oldmember->IsClient())
 	{
 		RemoveFromGroup(oldmember);
@@ -943,6 +956,7 @@ void Group::DisbandGroup(bool joinraid) {
 			strcpy(gu->yourname, members[i]->GetCleanName());
 			RemoveFromGroup(members[i]);
 			members[i]->CastToClient()->QueuePacket(outapp);
+			members[i]->CastToClient()->SendMarqueeMessage(0, "ALWg|0", 1000); // clear the Looter dropdown
 			SendMarkedNPCsToMember(members[i]->CastToClient(), true);
 			if (!joinraid)
 				members[i]->CastToClient()->LeaveGroupXTargets(this);
@@ -1922,6 +1936,182 @@ void Group::UnDelegatePuller(const char *OldPullerName, uint8 toggle)
 		}
 
 		SetPuller("");
+	}
+}
+
+// akk-stack Advanced Looting: the Master Looter role -- a 4th group leadership role alongside Main
+// Tank / Main Assist / Puller above, and implemented the same way (a MemberRoles bit plus a member
+// name on the group's group_leaders row) so that it survives zoning like the stock roles do.
+void Group::DelegateMasterLooter(const char *NewMasterLooterName, uint8 toggle)
+{
+	// This method is called when the group leader Delegates the Master Looter role to a member of the
+	// group (or himself). All group members in the zone are notified of the new Master Looter and it is
+	// recorded in the group_leaders table so as to persist across zones.
+	//
+
+	bool updateDB = false;
+
+	if(!NewMasterLooterName)
+		return;
+
+	Mob *m = entity_list.GetMob(NewMasterLooterName);
+
+	if(!m)
+		return;
+
+	if(MasterLooterName != NewMasterLooterName || !toggle)
+		updateDB = true;
+
+	SetMasterLooter(NewMasterLooterName);
+
+	for(uint32 i = 0; i < MAX_GROUP_MEMBERS; ++i)
+	{
+		if(members[i] && members[i]->IsClient())
+			NotifyMasterLooter(members[i]->CastToClient(), toggle);
+	}
+
+	if(updateDB) {
+
+		std::string query = StringFormat("UPDATE group_leaders SET looter = '%s' WHERE gid = %i LIMIT 1",
+                                        MasterLooterName.c_str(), GetID());
+		auto results = database.QueryDatabase(query);
+		if (!results.Success())
+			LogError("Unable to set group master looter: [{}]\n", results.ErrorMessage().c_str());
+	}
+}
+
+void Group::UnDelegateMasterLooter(const char *OldMasterLooterName, uint8 toggle)
+{
+	// Called when the group Leader removes the Master Looter delegation, handing loot control back to
+	// the group leader. Sends a message to each group member in the zone informing them of the change
+	// and updates the group_leaders table.
+	//
+	if(OldMasterLooterName == MasterLooterName) {
+
+		std::string query = StringFormat("UPDATE group_leaders SET looter = '' WHERE gid = %i LIMIT 1", GetID());
+		auto results = database.QueryDatabase(query);
+		if (!results.Success())
+			LogError("Unable to clear group master looter: [{}]\n", results.ErrorMessage().c_str());
+
+		if(!toggle) {
+			for(uint32 i = 0; i < MAX_GROUP_MEMBERS; ++i) {
+				if(members[i] && members[i]->IsClient())
+					NotifyMasterLooter(members[i]->CastToClient(), toggle);
+			}
+		}
+
+		SetMasterLooter("");
+	}
+}
+
+void Group::NotifyMasterLooter(Client *c, uint8 toggle)
+{
+	// Tell the specified Client who the group's Master Looter now is. Unlike the stock roles this is
+	// plain chat text rather than an OP_GroupRoles packet: RoF2 knows RoleNumbers 1-3 only, so a role
+	// packet for the looter would be ignored by the client at best.
+	//
+
+	if(!c)
+		return;
+
+	if(!MasterLooterName.size())
+		return;
+
+	if(toggle)
+		c->Message(Chat::White, "%s is now Master Looter.", MasterLooterName.c_str());
+	else
+		c->Message(Chat::White, "%s is no longer Master Looter.", MasterLooterName.c_str());
+}
+
+void Group::SetMasterLooter(const char *NewMasterLooterName)
+{
+	MasterLooterName = NewMasterLooterName;
+
+	// Unlike the stock Set*() role helpers, guard on a non-empty name: clearing the role passes "",
+	// which would otherwise strncasecmp-match every empty member slot and mark it as the looter.
+	const bool has_name = NewMasterLooterName && NewMasterLooterName[0];
+
+	for(uint32 i = 0; i < MAX_GROUP_MEMBERS; ++i)
+	{
+		if(has_name && !strncasecmp(membername[i], NewMasterLooterName, 64))
+			MemberRoles[i] |= RoleLooter;
+		else
+			MemberRoles[i] &= ~RoleLooter;
+	}
+}
+
+bool Group::AmIMasterLooter(const char *mob_name)
+{
+	if (!mob_name)
+		return false;
+
+	return !((bool)MasterLooterName.compare(mob_name));
+}
+
+bool Group::IsLootController(Mob *m)
+{
+	// Who may act on this group's Advanced Looting drops: the Master Looter once the leader has
+	// delegated that role, otherwise the group leader. Every other member still SEES the full drop
+	// list -- they just get no Loot/Give controls.
+	//
+	if (!m)
+		return false;
+
+	if (MasterLooterName.size())
+		return !strncasecmp(m->GetName(), MasterLooterName.c_str(), 64);
+
+	return IsLeader(m);
+}
+
+void Group::SendAdvLootLooterList(Client *to)
+{
+	// Feed one client the Looter dropdown: whether THEY are the leader (the client shows a dropdown vs a
+	// plain name label), the current loot controller's name, and the member roster LEADER-FIRST so combo
+	// index 0 always means "hand control back to the leader". Identify the leader by pointer (not name) so
+	// a clean-name/GetName mismatch can never list them twice. Mercs / non-clients are skipped.
+	if (!to)
+		return;
+
+	std::string              leader_name; // the leader's own clean name
+	std::vector<std::string> rest;        // every other member, in slot order
+	for (int i = 0; i < MAX_GROUP_MEMBERS; ++i) {
+		if (!members[i] || !members[i]->IsClient())
+			continue;
+		if (GetLeader() == members[i])
+			leader_name = members[i]->GetCleanName();
+		else
+			rest.emplace_back(members[i]->GetCleanName());
+	}
+	if (leader_name.empty())
+		leader_name = GetLeaderName(); // leader not in members[] (shouldn't happen) -- fall back
+
+	std::string ml_name = GetMasterLooterName();
+	if (ml_name.empty())
+		ml_name = leader_name;
+
+	std::string msg = "ALWg|";
+	msg += (GetLeader() == to) ? "1" : "0";
+	msg += "|";
+	msg += ml_name;
+	msg += "|";
+	msg += leader_name; // index 0
+	for (const auto &nm : rest) {
+		msg += "|";
+		msg += nm;
+	}
+
+	to->SendMarqueeMessage(0, msg, 1000);
+}
+
+void Group::SendAdvLootLooterListAll()
+{
+	// Roster changed (someone joined / left / the leader or ML changed): refresh every in-zone client's
+	// Looter dropdown. Out-of-zone members have a null members[] slot and self-heal on their next
+	// window open (the client re-requests) or kill.
+	for (int i = 0; i < MAX_GROUP_MEMBERS; ++i) {
+		if (members[i] && members[i]->IsClient()) {
+			SendAdvLootLooterList(members[i]->CastToClient());
+		}
 	}
 }
 

@@ -275,10 +275,13 @@ EntityList::EntityList()
 	raid_timer(1000),
 	trap_timer(1000)
 {
-	// set up ids between 1 and 1500
-	// neither client or server performs well if you have
-	// enough entities to exhaust this list
-	for (uint16 i = 1; i <= 1500; i++)
+	// Seed a deep id pool so freed ids stay cold for a long time. Freed ids go
+	// to the BACK of this FIFO; with a shallow pool a mass #repop hands a just-
+	// freed id straight to a different NPC, and a client that still holds the
+	// old entity applies the new spawn's name to the un-rebuilt old body
+	// ("High Chief Fosloas" relabeled "a fire beetle"). The id VALUE range is
+	// not the client's entity-count cap — live used ids well above 1500.
+	for (uint16 i = 1; i <= 12000; i++)
 		free_ids.push(i);
 }
 
@@ -1283,7 +1286,7 @@ uint16 EntityList::GetFreeID()
 	if (free_ids.empty()) { // hopefully this will never be true
 		// The client has a hard cap on entity count some where
 		// Neither the client or server performs well with a lot entities either
-		uint16 newid = 1500;
+		uint16 newid = 12000;
 		while (true) {
 			newid++;
 			if (GetID(newid) == nullptr)

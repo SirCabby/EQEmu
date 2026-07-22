@@ -36,6 +36,7 @@
 #include "common/repositories/tradeskill_recipe_entries_repository.h"
 #include "common/rulesys.h"
 #include "common/shared_tasks.h"
+#include "zone/advloot_roll.h"
 #include "zone/bot.h"
 #include "zone/dialogue_window.h"
 #include "zone/dynamic_zone.h"
@@ -361,6 +362,7 @@ void MapOpcodes()
 	ConnectedOpcodes[OP_Save] = &Client::Handle_OP_Save;
 	ConnectedOpcodes[OP_SpellBookSwap] = &Client::Handle_OP_SpellBookSwap;
 	ConnectedOpcodes[OP_BankPageSwap] = &Client::Handle_OP_BankPageSwap;
+	ConnectedOpcodes[OP_AdvLootAction] = &Client::Handle_OP_AdvLootAction;
 	ConnectedOpcodes[OP_SaveOnZoneReq] = &Client::Handle_OP_SaveOnZoneReq;
 	ConnectedOpcodes[OP_SelectTribute] = &Client::Handle_OP_SelectTribute;
 	ConnectedOpcodes[OP_SenseHeading] = &Client::Handle_OP_SenseHeading;
@@ -1634,6 +1636,8 @@ void Client::Handle_Connect_OP_ZoneEntry(const EQApplicationPacket *app)
 		group->SetMainTank(MainTankName);
 		group->SetMainAssist(AssistName);
 		group->SetPuller(PullerName);
+		// akk-stack Advanced Looting: restore the delegated Master Looter role too
+		group->SetMasterLooter(database.GetGroupMasterLooterName(group->GetID()).c_str());
 		group->SetNPCMarker(NPCMarkerName);
 		group->SetGroupAAs(&GLAA);
 		group->SetGroupMentor(mentor_percent, mentoree_name);
@@ -7634,6 +7638,19 @@ void Client::Handle_OP_GroupRoles(const EQApplicationPacket *app)
 			g->DelegatePuller(grs->Name1, grs->Toggle);
 		else
 			g->UnDelegatePuller(grs->Name1, grs->Toggle);
+		break;
+	}
+	case 4: //Master Looter -- akk-stack Advanced Looting (no stock RoF2 client UI for this role)
+	{
+		// Unlike the stock roles above, this one carries loot rights, so it is leader-gated here
+		// instead of trusting the client to only offer the control to the leader.
+		if (!g->IsLeader(this))
+			break;
+
+		if (grs->Toggle)
+			g->DelegateMasterLooter(grs->Name1, grs->Toggle);
+		else
+			g->UnDelegateMasterLooter(grs->Name1, grs->Toggle);
 		break;
 	}
 	default:
@@ -13839,6 +13856,438 @@ void Client::Handle_OP_BankPageSwap(const EQApplicationPacket *app)
 		target = 0;
 	}
 	SwapBankPage(target);
+}
+
+// akk-stack Advanced Looting: an item just left the corpse, so tell every advloot window that could be
+// showing it to drop that row -- "ALW2|<corpse_id>,<adv_uid>" over the same OP_Marquee carrier the
+// drops arrive on. Without this, other eligible looters keep a stale row for an item that is gone.
+static void AdvLootBroadcastRemoved(Client *actor, uint16 corpse_id, uint32 adv_uid, Client *also)
+{
+	if (!actor) {
+		return;
+	}
+
+	const std::string adv_msg =
+		"ALW2|" + std::to_string(corpse_id) + "," + std::to_string((unsigned) adv_uid);
+
+	Group *adv_g = actor->GetGroup();
+	if (adv_g) {
+		for (const auto &adv_m : adv_g->members) {
+			if (adv_m && adv_m->IsClient()) {
+				adv_m->CastToClient()->SendMarqueeMessage(0, adv_msg, 1000);
+			}
+		}
+	}
+	else {
+		actor->SendMarqueeMessage(0, adv_msg, 1000);
+	}
+
+	// a give target outside the actor's group (e.g. raid) still needs the row cleared
+	if (also && also != actor && (!adv_g || also->GetGroup() != adv_g)) {
+		also->SendMarqueeMessage(0, adv_msg, 1000);
+	}
+}
+
+// akk-stack Advanced Looting: push a player their saved per-item preferences for the Manage window --
+// "ALW6|<item_id>,<icon>,<mode>,<sell>,<value>,<name>|..." over the OP_Marquee carrier. mode is the roll
+// action (0 never / 1 always-need / 2 always-greed / 3 none), sell is the always-sell flag, value is the
+// merchant price in copper. Every saved row is listed (a sell-only row has mode 3). Capped at 20.
+static void AdvSendPrefList(Client *c)
+{
+	if (!c) {
+		return;
+	}
+
+	auto rows = database.QueryDatabase(fmt::format(
+		"SELECT `item_id`, `mode`, `sell` FROM `character_loot_never` WHERE `character_id` = {} ORDER BY `item_id`",
+		c->CharacterID()
+	));
+
+	std::string msg   = "ALW6"; // leading marker with no record = "your list is empty, clear it"
+	int         count = 0;
+	for (auto row : rows) {
+		const uint32        item_id = (uint32) atoi(row[0]);
+		const uint8         mode    = (uint8) atoi(row[1]);
+		const uint8         sell    = (uint8) atoi(row[2]);
+		const EQ::ItemData *item    = database.GetItem(item_id);
+		if (!item) {
+			continue;
+		}
+		msg += "|";
+		msg += std::to_string(item_id);
+		msg += ",";
+		msg += std::to_string((unsigned) item->Icon);
+		msg += ",";
+		msg += std::to_string((unsigned) mode);
+		msg += ",";
+		msg += std::to_string((unsigned) sell);
+		msg += ",";
+		msg += std::to_string((unsigned) item->Price);
+		msg += ",";
+		msg += item->Name;
+		if (++count >= 20) {
+			break;
+		}
+	}
+
+	c->SendMarqueeMessage(0, msg, 1000);
+}
+
+void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
+{
+	// Advanced Looting System (akk-stack) -- client->server action opcode (custom, RoF2 wire 0x7f0c).
+	// Raw LE body (packet opcode already stripped by the wire layer -- PassDecoder, no rof2.cpp translation):
+	//   [u8 action][u8 loot_slot][u8 arg][optional char target[] NUL-terminated]
+	// action: 0 LOOT, 1 LEAVE, 2 NEVER, 3 ROLL_NEED, 4 ROLL_GREED, 5 ROLL_NO, 6 ASSIGN(+target),
+	//         7 FREE_GRAB, 8 FILTER_TOGGLE, 9 COIN_SPLIT, 10 ML_MODE_SET, 11 PAGE, 12 LOOT_ALL, 13 HELLO.
+	// M0 stub: parse + log/echo only, to prove the loot mod's send path round-trips. Routing lands in M1+.
+	// Body (raw LE, no rof2.cpp translation): [u8 action][u16 corpse_entity_id][u16 equip_slot].
+	// The advloot window sends the corpse entity id + the item's LootItem::equip_slot (both arrived in
+	// the OP_Marquee push). action: 0 LOOT, 2 NEVER, 13 HELLO.
+	if (!app || app->size < 1) {
+		return;
+	}
+
+	const uint8 *b      = (const uint8 *) app->pBuffer;
+	const uint8  action = b[0];
+
+	// SET_PREF (20) -- save/change/remove a permanent per-item action; body [u8 action][u32 item_id][u8 mode]
+	// where mode 0/1/2 = never/always-need/always-greed and 255 = remove (reset to no action). This is
+	// item-based, not corpse-based, so it does not fit the corpse/uid body below.
+	if (action == 20 && app->size >= 6) {
+		const uint32 pref_item = (uint32) (b[1] | (b[2] << 8) | (b[3] << 16) | (b[4] << 24));
+		const uint8  pref_mode = b[5];
+		if (!pref_item) {
+			return;
+		}
+
+		const EQ::ItemData *pref_id = database.GetItem(pref_item);
+		if (pref_mode == 255) {
+			// clear the ROLL preference (mode -> 3 = none); keep the row only if "always sell" still set
+			database.QueryDatabase(fmt::format(
+				"UPDATE `character_loot_never` SET `mode` = 3 WHERE `character_id` = {} AND `item_id` = {}",
+				CharacterID(), pref_item
+			));
+			database.QueryDatabase(fmt::format(
+				"DELETE FROM `character_loot_never` WHERE `character_id` = {} AND `item_id` = {} AND `mode` = 3 AND `sell` = 0",
+				CharacterID(), pref_item
+			));
+			Message(Chat::Yellow, "[AdvLoot] Cleared the saved action for %s.",
+					pref_id ? pref_id->Name : "that item");
+		}
+		else if (pref_mode <= 3) {
+			// set the roll pref (0 never / 1 need / 2 greed / 3 none). mode 3 keeps the row with no roll
+			// action so the player can still mark it auto-sell. ON DUPLICATE only touches `mode`, so an
+			// existing `sell` flag is kept.
+			database.QueryDatabase(fmt::format(
+				"INSERT INTO `character_loot_never` (`character_id`, `item_id`, `mode`) VALUES ({}, {}, {}) "
+				"ON DUPLICATE KEY UPDATE `mode` = {}",
+				CharacterID(), pref_item, pref_mode, pref_mode
+			));
+			const char *word = pref_mode == 0 ? "Never" :
+			                   pref_mode == 1 ? "always Need" :
+			                   pref_mode == 2 ? "always Greed" : "no auto roll action";
+			Message(Chat::Yellow, "[AdvLoot] %s: %s.", pref_id ? pref_id->Name : "that item", word);
+			if (pref_mode != 3) {
+				// apply it to any live roll on this item right now (e.g. it is sitting in the window)
+				adv_loot_rolls.ApplyPrefToLive(this, pref_item, pref_mode);
+			}
+		}
+		return;
+	}
+
+	// SET_SELL (25) -- toggle "always sell" for an item (independent of the roll pref); body
+	// [u8 action][u32 item_id][u8 sell]. When set, looting the item later auto-converts it to coin.
+	if (action == 25 && app->size >= 6) {
+		const uint32 sell_item = (uint32) (b[1] | (b[2] << 8) | (b[3] << 16) | (b[4] << 24));
+		const uint8  sell_on   = b[5] ? 1 : 0;
+		if (!sell_item) {
+			return;
+		}
+		const EQ::ItemData *sell_id = database.GetItem(sell_item);
+		if (sell_on) {
+			// create with mode 3 (no roll pref) if new; ON DUPLICATE only touches `sell`, keeping mode
+			database.QueryDatabase(fmt::format(
+				"INSERT INTO `character_loot_never` (`character_id`, `item_id`, `mode`, `sell`) VALUES ({}, {}, 3, 1) "
+				"ON DUPLICATE KEY UPDATE `sell` = 1",
+				CharacterID(), sell_item
+			));
+		}
+		else {
+			database.QueryDatabase(fmt::format(
+				"UPDATE `character_loot_never` SET `sell` = 0 WHERE `character_id` = {} AND `item_id` = {}",
+				CharacterID(), sell_item
+			));
+			database.QueryDatabase(fmt::format(
+				"DELETE FROM `character_loot_never` WHERE `character_id` = {} AND `item_id` = {} AND `mode` = 3 AND `sell` = 0",
+				CharacterID(), sell_item
+			));
+		}
+		Message(Chat::Yellow, "[AdvLoot] %s will %s be auto-sold when looted.",
+				sell_id ? sell_id->Name : "that item", sell_on ? "now" : "no longer");
+		return;
+	}
+
+	// REQUEST_PREF_LIST (21) -- the Manage window is opening; send the saved-preferences list (ALW6).
+	if (action == 21) {
+		AdvSendPrefList(this);
+		return;
+	}
+
+	// REQUEST_LOOTER (28) -- the AdvLootWnd just opened; send current group/looter state so its Looter
+	// label + dropdown show even with no items. Grouped -> the roster (ALWg); solo -> "ALWg|0" (clear).
+	if (action == 28) {
+		Group *adv_g = GetGroup();
+		if (adv_g) {
+			adv_g->SendAdvLootLooterList(this);
+		}
+		else {
+			SendMarqueeMessage(0, "ALWg|0", 1000);
+		}
+		return;
+	}
+
+	// MARK_SELL (27) -- an eligible looter flags/unflags THIS drop for single-sell if they win it; body
+	// [u8 action][u16 corpse_id][u16 adv_uid][u8 on]. Available to everyone (not just the controller).
+	if (action == 27 && app->size >= 6) {
+		const uint16 ms_corpse = (uint16) (b[1] | (b[2] << 8));
+		const uint32 ms_uid    = (uint32) (b[3] | (b[4] << 8));
+		adv_loot_rolls.MarkSellOnWin(this, ms_corpse, ms_uid, b[5] != 0);
+		return;
+	}
+
+	// TARGET_CORPSE (22) -- the player clicked a row's corpse name; body [u8 action][u16 corpse_id].
+	// Point their target at that corpse (same as the native "locate corpse" flow).
+	if (action == 22 && app->size >= 3) {
+		const uint16 tgt_corpse = (uint16) (b[1] | (b[2] << 8));
+		Corpse      *corpse     = entity_list.GetCorpseByID(tgt_corpse);
+		if (corpse) {
+			SetTarget(corpse);
+			SendTargetCommand(corpse->GetID());
+		}
+		return;
+	}
+
+	// DENY_AUTOSPLIT (23) -- toggle opting out of coin auto-split; body [u8 action][u8 deny] (1/0).
+	if (action == 23 && app->size >= 2) {
+		SetAdvLootDeniesSplit(b[1] != 0);
+		Message(Chat::Yellow, "[AdvLoot] You will %s coin from group auto-split.",
+				b[1] != 0 ? "no longer receive" : "again receive");
+		return;
+	}
+
+	// INSPECT_ITEM (24) -- the player clicked an item icon/name; body [u8 action][u32 item_id]. Open the
+	// item's display window client-side (an item link) without giving them the item.
+	if (action == 24 && app->size >= 5) {
+		const uint32        insp_item = (uint32) (b[1] | (b[2] << 8) | (b[3] << 16) | (b[4] << 24));
+		const EQ::ItemData *insp_id   = insp_item ? database.GetItem(insp_item) : nullptr;
+		if (insp_id) {
+			EQ::ItemInstance *inst = database.CreateItem(insp_id);
+			if (inst) {
+				SendItemPacket(0, inst, ItemPacketViewLink);
+				safe_delete(inst);
+			}
+		}
+		return;
+	}
+
+	// SET_MASTER_LOOTER -- no corpse; body [u8 action][u16 arg]: 1 = designate current target, 0 = clear
+	// (back to the group leader). Leader-only. Everyone keeps SEEING the drops either way.
+	//
+	// Master Looter is a real group leadership role (Group::DelegateMasterLooter -- a MemberRoles bit
+	// persisted to group_leaders.looter, exactly like Main Tank / Main Assist / Puller), so the
+	// delegation survives zoning. RoF2 has no native UI for a looter role, hence this command path.
+	if (action == 10 && app->size >= 3) {
+		const uint16 adv_arg = (uint16) (b[1] | (b[2] << 8));
+
+		Group *adv_g = GetGroup();
+		if (!adv_g) {
+			Message(Chat::Yellow, "[AdvLoot] You are not in a group.");
+			return;
+		}
+		if (!adv_g->IsLeader(this)) {
+			Message(Chat::Yellow, "[AdvLoot] Only the group leader can set the master looter.");
+			return;
+		}
+
+		// The looter dropdown appends the picked member's NAME (b[3..]); `/advloot ml` sends none and
+		// falls back to the current target. arg 0 (or picking the leader) hands control back to the leader.
+		std::string adv_name;
+		if (app->size > 3) {
+			adv_name.assign((const char *) &b[3], app->size - 3);
+			adv_name = adv_name.c_str(); // trim at any embedded NUL
+		}
+
+		bool        adv_clear = false;
+		std::string adv_who;
+		if (adv_arg == 0 || (!adv_name.empty() && adv_name == adv_g->GetLeaderName())) {
+			// hand control back to the leader
+			const std::string adv_old = adv_g->GetMasterLooterName(); // copy: UnDelegate clears this string
+			if (!adv_old.empty()) {
+				adv_g->UnDelegateMasterLooter(adv_old.c_str());
+			}
+			adv_who   = adv_g->GetLeaderName();
+			adv_clear = true;
+		}
+		else if (!adv_name.empty()) {
+			// designate BY NAME (from the dropdown) -- validate the name is a group member first
+			bool adv_member = false;
+			for (int i = 0; i < MAX_GROUP_MEMBERS; ++i) {
+				if (adv_g->members[i] && adv_g->members[i]->IsClient() &&
+				    adv_name == adv_g->members[i]->GetCleanName()) {
+					adv_member = true;
+					break;
+				}
+			}
+			if (!adv_member) {
+				Message(Chat::Yellow, "[AdvLoot] %s is not in your group.", adv_name.c_str());
+				return;
+			}
+			adv_g->DelegateMasterLooter(adv_name.c_str(), 1);
+			adv_who = adv_name;
+		}
+		else {
+			// legacy /advloot ml: designate the current target
+			Mob *adv_t = GetTarget();
+			if (!adv_t || !adv_t->IsClient() || adv_t->CastToClient()->GetGroup() != adv_g) {
+				Message(Chat::Yellow, "[AdvLoot] Target a group member to make them master looter.");
+				return;
+			}
+			adv_g->DelegateMasterLooter(adv_t->GetCleanName(), 1);
+			adv_who = adv_t->GetCleanName();
+		}
+
+		// Refresh everyone: the rights flag (ALW4, gates their buttons) AND the Looter label/dropdown
+		// (ALWg). The role delegation already announced itself, so only the hand-back needs naming who has it.
+		for (const auto &adv_gm : adv_g->members) {
+			if (!adv_gm || !adv_gm->IsClient()) {
+				continue;
+			}
+			Client *adv_gc = adv_gm->CastToClient();
+			if (adv_clear) {
+				adv_gc->Message(Chat::Yellow, "[AdvLoot] %s controls this group's loot.", adv_who.c_str());
+			}
+			adv_gc->SendMarqueeMessage(0, adv_g->IsLootController(adv_gc) ? "ALW4|1" : "ALW4|0", 1000);
+			adv_g->SendAdvLootLooterList(adv_gc);
+		}
+		return;
+	}
+
+	// Need/Greed rolling. Every drop is auto-rolled (opened at death), so there is no "start" action:
+	// 3 / 4 / 5 = this player's Need / Greed / Pass answer, validated inside AdvLootRollManager against
+	// the live session (votes from non-participants, second votes, or a locked row get nowhere).
+	if ((action == 3 || action == 4 || action == 5) && app->size >= 5) {
+		const uint16 roll_corpse = (uint16) (b[1] | (b[2] << 8));
+		const uint32 roll_uid    = (uint32) (b[3] | (b[4] << 8));
+
+		const AdvLootRollManager::Vote roll_vote =
+			(action == 3) ? AdvLootRollManager::VoteNeed :
+			(action == 4) ? AdvLootRollManager::VoteGreed : AdvLootRollManager::VotePass;
+		adv_loot_rolls.Cast(this, roll_corpse, roll_uid, roll_vote);
+		return;
+	}
+
+	// LOCK (8) / UNLOCK (9): the loot controller suspends / resumes an item's roll so they can hand it
+	// out directly. Controller-only, enforced here.
+	if ((action == 8 || action == 9) && app->size >= 5) {
+		const uint16 lock_corpse = (uint16) (b[1] | (b[2] << 8));
+		const uint32 lock_uid    = (uint32) (b[3] | (b[4] << 8));
+
+		Group *adv_cg = GetGroup();
+		if (adv_cg && !adv_cg->IsLootController(this)) {
+			Message(Chat::Yellow, "[AdvLoot] Only your group's loot controller can lock loot.");
+			return;
+		}
+		adv_loot_rolls.SetLocked(lock_corpse, lock_uid, action == 8);
+		return;
+	}
+
+	if ((action == 0 || action == 2 || action == 6 || action == 26) && app->size >= 5) {
+		const uint16 corpse_id = (uint16) (b[1] | (b[2] << 8));
+		const uint32 adv_uid   = (uint32) (b[3] | (b[4] << 8));
+
+		Corpse *corpse = entity_list.GetCorpseByID(corpse_id);
+		if (!corpse) {
+			return;
+		}
+
+		// Taking, selling, or handing out an item is restricted to the group's loot controller (the
+		// delegated Master Looter, else the leader). Enforced here as well as hidden client-side --
+		// never trust the client. NEVER is personal (own list only), so it is always allowed.
+		// Permission (decoupled from lock for Loot/Sell): GIVE is always the controller's alone. LOOT and
+		// SELL are open to any eligible looter while the drop is UNLOCKED; once the master looter LOCKS it,
+		// only the controller may loot/sell it (and the native corpse is blocked too, in corpse.cpp).
+		if (action == 6) {
+			Group *adv_cg = GetGroup();
+			if (adv_cg && !adv_cg->IsLootController(this)) {
+				Message(Chat::Yellow, "[AdvLoot] Only your group's loot controller can hand out loot.");
+				return;
+			}
+		}
+		else if (action == 0 || action == 26) {
+			Group *adv_cg = GetGroup();
+			if (adv_cg && !adv_cg->IsLootController(this) && adv_loot_rolls.IsLocked(corpse_id, adv_uid)) {
+				Message(Chat::Yellow, "[AdvLoot] That item is locked by the master looter.");
+				return;
+			}
+		}
+
+		if (action == 0) { // LOOT -- move the item straight to inventory (out-of-range)
+			if (corpse->AdvLootItem(this, adv_uid)) {
+				adv_loot_rolls.Cancel(corpse_id, adv_uid); // the item is gone; kill any roll on it
+				AdvLootBroadcastRemoved(this, corpse_id, adv_uid, nullptr);
+			}
+		}
+		else if (action == 26) { // SELL -- remove it and pay this player its merchant price now
+			if (corpse->AdvSellItem(this, adv_uid)) {
+				adv_loot_rolls.Cancel(corpse_id, adv_uid);
+				AdvLootBroadcastRemoved(this, corpse_id, adv_uid, nullptr);
+			}
+		}
+		else if (action == 6) { // ASSIGN/GIVE -- hand the item to my current target
+			Mob *adv_t = GetTarget();
+			if (!adv_t || !adv_t->IsClient()) {
+				Message(Chat::Yellow, "[AdvLoot] Target a group member to give that item to.");
+				return;
+			}
+
+			Client *adv_tc = adv_t->CastToClient();
+			bool    adv_ok = (adv_tc == this);
+			if (!adv_ok && GetGroup() && GetGroup() == adv_tc->GetGroup()) {
+				adv_ok = true;
+			}
+			if (!adv_ok && GetRaid() && GetRaid() == adv_tc->GetRaid()) {
+				adv_ok = true;
+			}
+			if (!adv_ok) {
+				Message(Chat::Yellow, "[AdvLoot] %s is not in your group or raid.", adv_tc->GetName());
+				return;
+			}
+
+			const uint32        adv_iid  = corpse->AdvItemId(adv_uid);
+			const EQ::ItemData *adv_item = adv_iid ? database.GetItem(adv_iid) : nullptr;
+			if (corpse->AdvLootItem(adv_tc, adv_uid)) {
+				adv_loot_rolls.Cancel(corpse_id, adv_uid); // the item is gone; kill any roll on it
+				Message(
+					Chat::Loot, "You give %s to %s.",
+					adv_item ? adv_item->Name : "that item", adv_tc->GetName()
+				);
+				AdvLootBroadcastRemoved(this, corpse_id, adv_uid, adv_tc);
+			}
+		}
+		else {             // NEVER -- persist the item's id so future pushes/aggregation skip it
+			const uint32 item_id = corpse->AdvItemId(adv_uid);
+			if (item_id) {
+				database.QueryDatabase(fmt::format(
+					"INSERT INTO `character_loot_never` (`character_id`, `item_id`, `mode`) VALUES ({}, {}, 0) "
+					"ON DUPLICATE KEY UPDATE `mode` = 0",
+					CharacterID(), item_id
+				));
+				const EQ::ItemData *item = database.GetItem(item_id);
+				Message(Chat::Yellow, "[AdvLoot] Won't auto-list %s again.", item ? item->Name : "that item");
+			}
+		}
+	}
 }
 
 void Client::Handle_OP_SelectTribute(const EQApplicationPacket *app)

@@ -43,6 +43,11 @@ struct LootItem {
 	uint16      npc_min_level;
 	uint16      npc_max_level;
 	uint32      lootdrop_id; // required for zone state referencing
+	// akk-stack Advanced Looting: a stable, per-corpse-unique id for this drop. equip_slot is -1
+	// (SLOT_INVALID) for almost every NPC drop and lootslot is 0xFFFF outside an open loot window,
+	// so neither can tell two drops on one corpse apart; the advloot window/roll keys on this instead.
+	// Assigned lazily (1..N) when the death-time advloot push first walks the corpse. 0 = unassigned.
+	uint32      adv_uid{};
 };
 
 using LootItems = std::list<LootItem*>;

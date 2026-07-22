@@ -647,4 +647,5 @@ N(OP_ResetAA),
 N(OP_UnderWorld),
 N(OP_SpellBookSwap),   // akk-stack: client->server spellbook-volume swap (custom, RoF2 wire 0x7f0a)
 N(OP_BankPageSwap),    // akk-stack: client->server personal-bank page swap (custom, RoF2 wire 0x7f0b)
+N(OP_AdvLootAction),   // akk-stack: client->server advanced-looting action (custom, RoF2 wire 0x7f0c)
 // mail and chat opcodes located in ../mail_oplist.h
