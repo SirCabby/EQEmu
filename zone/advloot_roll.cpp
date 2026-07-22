@@ -18,6 +18,7 @@
 #include "zone/advloot_roll.h"
 
 #include "common/eq_constants.h"
+#include "common/say_link.h"
 #include "common/strings.h"
 #include "zone/client.h"
 #include "zone/corpse.h"
@@ -29,6 +30,21 @@
 #include <algorithm>
 
 AdvLootRollManager adv_loot_rolls;
+
+// A clickable item link for the roll chat lines (falls back to the plain name if the item is missing).
+// Sent via Client::Message, so each recipient's client translator renders the link for their version.
+static std::string adv_item_link(uint32 item_id, const std::string &fallback)
+{
+	const EQ::ItemData *item = database.GetItem(item_id);
+	if (!item) {
+		return fallback;
+	}
+
+	EQ::SayLinkEngine linker;
+	linker.SetLinkType(EQ::saylink::SayLinkItemData);
+	linker.SetItemData(item);
+	return linker.GenerateLink();
+}
 
 uint32 AdvLootRollManager::CorpseSecondsLeft(uint16 corpse_id)
 {
@@ -193,14 +209,14 @@ void AdvLootRollManager::Cast(Client *voter, uint16 corpse_id, uint32 adv_uid, V
 	}
 
 	if (s->votes.count(character_id)) {
-		voter->Message(Chat::Yellow, "[AdvLoot] You have already rolled on %s.", s->item_name.c_str());
+		voter->Message(Chat::Yellow, "[AdvLoot] You have already rolled on %s.", adv_item_link(s->item_id, s->item_name).c_str());
 		return;
 	}
 
 	s->votes[character_id] = vote;
 
 	if (vote == VotePass) {
-		Announce(*s, fmt::format("[AdvLoot] {} passes on {}.", voter->GetCleanName(), s->item_name));
+		Announce(*s, fmt::format("[AdvLoot] {} passes on {}.", voter->GetCleanName(), adv_item_link(s->item_id, s->item_name)));
 	}
 	else {
 		const int roll         = zone->random.Int(1, 1000);
@@ -208,7 +224,7 @@ void AdvLootRollManager::Cast(Client *voter, uint16 corpse_id, uint32 adv_uid, V
 		Announce(
 			*s,
 			fmt::format("[AdvLoot] {} rolls {} ({}) on {}.",
-						voter->GetCleanName(), roll, vote == VoteNeed ? "Need" : "Greed", s->item_name)
+						voter->GetCleanName(), roll, vote == VoteNeed ? "Need" : "Greed", adv_item_link(s->item_id, s->item_name))
 		);
 	}
 
@@ -234,7 +250,7 @@ void AdvLootRollManager::SetLocked(uint16 corpse_id, uint32 adv_uid, bool locked
 	Announce(
 		*s,
 		fmt::format("[AdvLoot] {} was {} by the master looter.",
-					s->item_name, locked ? "locked" : "unlocked")
+					adv_item_link(s->item_id, s->item_name), locked ? "locked" : "unlocked")
 	);
 	SendTally(*s); // repaint the row into / out of its locked (Loot/Give) controls at once
 }
@@ -317,7 +333,7 @@ void AdvLootRollManager::Resolve(Session &s)
 	}
 
 	if (!winner_id) {
-		Announce(s, fmt::format("[AdvLoot] Everyone passed on {} -- it stays on the corpse.", s.item_name));
+		Announce(s, fmt::format("[AdvLoot] Everyone passed on {} -- it stays on the corpse.", adv_item_link(s.item_id, s.item_name)));
 		SendRowRemoved(s); // nobody wanted it; clear the decided row from every window
 		return;
 	}
@@ -332,7 +348,7 @@ void AdvLootRollManager::Resolve(Session &s)
 	                  (sell ? corpse->AdvSellItem(winner, s.adv_uid) : corpse->AdvLootItem(winner, s.adv_uid));
 
 	if (!ok) {
-		Announce(s, fmt::format("[AdvLoot] {} could not be awarded -- it stays on the corpse.", s.item_name));
+		Announce(s, fmt::format("[AdvLoot] {} could not be awarded -- it stays on the corpse.", adv_item_link(s.item_id, s.item_name)));
 		SendRowRemoved(s);
 		return;
 	}
@@ -340,7 +356,7 @@ void AdvLootRollManager::Resolve(Session &s)
 	Announce(
 		s,
 		fmt::format("[AdvLoot] {} wins {} with a {} roll of {}.",
-					winner->GetCleanName(), s.item_name, best_vote == VoteNeed ? "Need" : "Greed", best)
+					winner->GetCleanName(), adv_item_link(s.item_id, s.item_name), best_vote == VoteNeed ? "Need" : "Greed", best)
 	);
 	SendRowRemoved(s); // the item is off the corpse now -- clear the row everywhere
 }
