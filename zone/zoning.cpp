@@ -25,6 +25,7 @@
 #include "common/strings.h"
 #include "zone/bot.h"
 #include "zone/dynamic_zone.h"
+#include "zone/private_instance.h"
 #include "zone/queryserv.h"
 #include "zone/quest_parser_collection.h"
 #include "zone/string_ids.h"
@@ -158,6 +159,22 @@ void Client::Handle_OP_ZoneChange(const EQApplicationPacket *app) {
 					return;
 				}
 			}
+		}
+	}
+
+	// akk-stack Private Zone Instancing: on a client-initiated zone entry (zone line) with no explicit
+	// instance, route an associated player into their private instance of the target zone. Placed before
+	// the instance-verification block so the injected instance flows through VerifyInstanceAlive /
+	// VerifyZoneInstance / safe-point loading and out to DoZoneSuccess. (ZonePC covers server-initiated
+	// moves; this covers client-initiated zone lines.)
+	if (target_instance_id == 0) {
+		uint16 pi_id = PrivateInstance::Resolve(this, target_zone_id, PrivateInstance::BaseVersion(target_zone_id));
+		if (pi_id) {
+			target_instance_id = pi_id;
+			LogZoning(
+				"Client [{}] routed into private instance [{}] of zone [{}]",
+				GetCleanName(), pi_id, target_zone_id
+			);
 		}
 	}
 
@@ -793,6 +810,20 @@ void Client::ZonePC(uint32 zoneID, uint32 instance_id, float x, float y, float z
 		// If we are zoning to the same zone, we need to use the current instance ID if it is not specified.
 		if (WorldContentService::Instance()->IsInPublicStaticInstance(instance_id) && zoneID == zone->GetZoneID() && instance_id == 0) {
 			instance_id = zone->GetInstanceID();
+		}
+	}
+
+	// akk-stack Private Zone Instancing: when no explicit instance was requested (instance_id == 0),
+	// route an associated player into their private instance of this zone. Runs after the static/global
+	// version middleware and BEFORE zone sharding, so a private instance takes precedence.
+	if (instance_id == 0) {
+		uint16 pi_id = PrivateInstance::Resolve(this, zoneID, PrivateInstance::BaseVersion(zoneID));
+		if (pi_id) {
+			instance_id = pi_id;
+			LogZoning(
+				"Client [{}] routed into private instance [{}] of zone [{}]",
+				GetCleanName(), pi_id, zoneID
+			);
 		}
 	}
 

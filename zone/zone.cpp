@@ -43,6 +43,7 @@
 #include "zone/advloot_roll.h"
 #include "zone/dynamic_zone.h"
 #include "zone/guild_mgr.h"
+#include "zone/private_instance.h"
 #include "zone/map.h"
 #include "zone/mob_movement_manager.h"
 #include "zone/npc_scale_manager.h"
@@ -1581,6 +1582,13 @@ bool Zone::Process() {
 		if (autoshutdown_timer.Check()) {
 			ResetShutdownTimer();
 			if (numclients == 0) {
+				// akk-stack Private Zone Instancing: an empty private instance with no remaining
+				// associations is torn down here, in-process (so corpse relocation to the public zone
+				// is clobber-safe); an empty-but-still-associated one just idle-shuts with its record
+				// intact, so re-entry re-boots it.
+				if (GetInstanceID() > 0) {
+					PrivateInstance::ReconcileEmptyInProcess();
+				}
 				return false;
 			}
 		}

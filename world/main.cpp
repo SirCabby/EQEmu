@@ -20,6 +20,11 @@
 #include "common/eq_packet.h"
 #include "common/eq_stream_ident.h"
 #include "common/eqemu_logsys.h"
+#include "common/rulesys.h"
+#include "common/strings.h"
+#include <fmt/format.h>
+#include <ctime>
+#include <map>
 #include "common/eqtime.h"
 #include "common/event/event_loop.h"
 #include "common/events/player_event_logs.h"
@@ -39,6 +44,7 @@
 #include "world/adventure_manager.h"
 #include "world/client.h"
 #include "world/clientlist.h"
+#include "world/cliententry.h"
 #include "world/console.h"
 #include "world/dynamic_zone_manager.h"
 #include "world/launcher_list.h"
@@ -72,6 +78,72 @@ uint32              numzones   = 0;
 const WorldConfig   *Config;
 
 void CatchSignal(int sig_num);
+
+// akk-stack Private Zone Instancing world sweep (runs on PurgeInstanceTimer, ~7.5 min):
+//   (1) OFFLINE CLEANUP -- drop associations for players offline longer than the grace window (the
+//       "remove instances from offline players within an hour" rule). offline-since is tracked in
+//       memory only, so it RESETS at each server restart (fresh grace after a bounce, by design).
+//   (2) REAP -- destroy orphaned instances whose zone process is DOWN and now have no associations
+//       (BOOTED ones self-tear-down in-process; see PrivateInstance::ReconcileEmptyInProcess). Corpses
+//       are relocated visibly to the base zone (instance_id=0, NOT buried) BEFORE DeleteInstance.
+// Login routing is native: character_data.zone_instance persists the instance, and world validates it
+// with VerifyInstanceAlive/VerifyZoneInstance (falling back to safe-return/public) on connect.
+static std::map<uint32, uint32> g_pi_offline_since; // charid -> first-seen-offline epoch (in-memory)
+
+static void SweepPrivateInstances()
+{
+	const uint32 now   = static_cast<uint32>(time(nullptr));
+	const uint32 grace = static_cast<uint32>(RuleI(PrivateInstance, OfflineCleanupSeconds));
+
+	auto rows = database.QueryDatabase("SELECT id FROM instance_list WHERE notes LIKE 'akk_private:%'");
+	if (!rows.Success()) {
+		return;
+	}
+	for (auto row = rows.begin(); row != rows.end(); ++row) {
+		const uint16 id = static_cast<uint16>(Strings::ToUnsignedInt(row[0]));
+		if (!id) {
+			continue;
+		}
+
+		// (1) Offline-associate cleanup.
+		auto assoc = database.QueryDatabase(fmt::format("SELECT charid FROM instance_list_player WHERE id = {}", id));
+		if (assoc.Success()) {
+			for (auto ar = assoc.begin(); ar != assoc.end(); ++ar) {
+				const uint32 charid = Strings::ToUnsignedInt(ar[0]);
+				if (!charid) {
+					continue;
+				}
+				auto       cle    = ClientList::Instance()->FindCLEByCharacterID(charid);
+				const bool online = cle && cle->Online() != CLE_Status::Offline;
+				if (online) {
+					g_pi_offline_since.erase(charid); // back online -> reset the clock
+					continue;
+				}
+				auto it = g_pi_offline_since.find(charid);
+				if (it == g_pi_offline_since.end()) {
+					g_pi_offline_since[charid] = now; // first seen offline (fresh grace after a restart)
+				} else if (now - it->second >= grace) {
+					database.RemoveClientFromInstance(id, charid);
+					g_pi_offline_since.erase(charid);
+					LogInfo("[PrivateInstance] world sweep removed offline associate char [{}] from instance [{}]", charid, id);
+				}
+			}
+		}
+
+		// (2) Reap: only DOWN + now-unassociated instances (booted ones self-tear-down in-process).
+		if (ZSList::Instance()->FindByInstanceID(id)) {
+			continue; // booted
+		}
+		auto still = database.QueryDatabase(fmt::format("SELECT 1 FROM instance_list_player WHERE id = {} LIMIT 1", id));
+		if (still.Success() && still.RowCount() > 0) {
+			continue; // still associated -> keep the record (re-bootable on re-entry)
+		}
+		database.QueryDatabase(fmt::format("UPDATE character_corpses SET instance_id = 0 WHERE instance_id = {}", id));
+		database.DeleteInstance(id);
+		database.QueryDatabase(fmt::format("DELETE FROM instance_list WHERE id = {}", id));
+		LogInfo("[PrivateInstance] world sweep reaped orphaned instance [{}] (down + unassociated)", id);
+	}
+}
 
 inline void UpdateWindowTitle(std::string new_title)
 {
@@ -406,6 +478,7 @@ int main(int argc, char **argv)
 
 		if (PurgeInstanceTimer.Check()) {
 			database.PurgeExpiredInstances();
+			SweepPrivateInstances();
 			database.PurgeAllDeletedDataBuckets();
 			CharacterExpeditionLockoutsRepository::DeleteWhere(database, "expire_time <= NOW()");
 			CharacterTaskTimersRepository::DeleteWhere(database, "expire_time <= NOW()");

@@ -162,6 +162,7 @@ int command_init(void)
 		command_add("hp", "Refresh your HP bar from the server.", AccountStatus::Player, command_hp) ||
 		command_add("illusionblock", "Controls whether or not illusion effects will land on you when cast by other players or bots", AccountStatus::Guide, command_illusion_block) ||
 		command_add("instance", "Modify Instances", AccountStatus::GMMgmt, command_instance) ||
+		command_add("privateinstance", "[create [zoneid] [version]|status|leave|destroy|clearlocks] - Private Zone Instancing dev/test", AccountStatus::GMMgmt, command_privateinstance) ||
 		command_add("interrogateinv", "use [help] argument for available options", AccountStatus::Player, command_interrogateinv) ||
 		command_add("interrupt", "[Message ID] [Color] - Interrupt your casting. Arguments are optional.", AccountStatus::Guide, command_interrupt) ||
 		command_add("invsnapshot", "Manipulates inventory snapshots for your current target", AccountStatus::QuestTroupe, command_invsnapshot) ||

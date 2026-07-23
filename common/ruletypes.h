@@ -1181,6 +1181,13 @@ RULE_INT(EvolvingItems, DelayUponEquipping, 30000, "Delay in ms before an evolvi
 RULE_BOOL(EvolvingItems, DestroyAugmentsOnEvolve, false, "If this is enabled, any augments in an item will be destroyed when the item evolves. Otherwise, send augments to the player via the parcel system (requires that the Parcel System be enabled).")
 RULE_CATEGORY_END()
 
+RULE_CATEGORY(PrivateInstance)
+RULE_BOOL(PrivateInstance, InstancingEnabled, true, "akk-stack: master enable for the /instance private-instancing feature.")
+RULE_INT(PrivateInstance, ZoneLockoutSeconds, 3600, "akk-stack: per-zone replay lockout after being in a private instance of that zone (seconds).")
+RULE_INT(PrivateInstance, OfflineCleanupSeconds, 3600, "akk-stack: remove a player's private-instance association after this many seconds offline.")
+RULE_STRING(PrivateInstance, Blocklist, "guildlobby,guildhall,poknowledge,bazaar,nexus,tutoriala,tutorialb,load,load2,cshome,gmzone", "akk-stack: comma-delimited zone short names that cannot be privately instanced (LDoN adventure wings are auto-excluded).")
+RULE_CATEGORY_END()
+
 #undef RULE_CATEGORY
 #undef RULE_INT
 #undef RULE_REAL

@@ -22,6 +22,7 @@
 */
 
 #include "client.h"
+#include "private_instance.h"
 
 #include "common/data_verification.h"
 #include "common/eqemu_logsys.h"
@@ -522,6 +523,10 @@ bool Client::Process() {
 			CalcATK();
 			CalcMaxEndurance();
 			CalcRestState();
+			// akk-stack Private Zone Instancing: fire a queued deferred port once we're rested.
+			if (m_pi_pending_port) {
+				PrivateInstance::TryDeferredPort(this);
+			}
 			DoHPRegen();
 			DoManaRegen();
 			DoEnduranceRegen();

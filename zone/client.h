@@ -1607,6 +1607,13 @@ public:
 	bool CanEnterZone(const std::string& zone_short_name = "", int16 instance_version = -1);
 
 	uint32 GetAggroCount();
+	// akk-stack Private Zone Instancing: true once the out-of-combat rest period has elapsed (the
+	// "could get OOC fast regen if I sat" state) -- sitting NOT required; implies AggroCount==0.
+	inline bool IsOutOfCombatRested() const { return GetRestTimer() == 0; }
+	// akk-stack Private Zone Instancing: a deferred port into a private instance, fired by
+	// PrivateInstance::TryDeferredPort once the player becomes rested (0 = none).
+	inline void   SetPendingPrivatePort(uint16 instance_id) { m_pi_pending_port = instance_id; }
+	inline uint16 GetPendingPrivatePort() const { return m_pi_pending_port; }
 	void IncrementAggroCount(bool raid_target = false);
 	void DecrementAggroCount();
 	void SendPVPStats();
@@ -2276,6 +2283,7 @@ private:
 	uint32 AggroCount; // How many mobs are aggro on us.
 
 	bool ooc_regen;
+	uint16 m_pi_pending_port = 0; // akk-stack Private Zone Instancing: queued deferred port (0 = none)
 	float AreaHPRegen;
 	float AreaManaRegen;
 	float AreaEndRegen;

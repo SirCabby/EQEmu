@@ -16,6 +16,7 @@
 	along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 #include "client.h"
+#include "private_instance.h"
 
 #include "common/data_bucket.h"
 #include "common/data_verification.h"
@@ -363,6 +364,7 @@ void MapOpcodes()
 	ConnectedOpcodes[OP_SpellBookSwap] = &Client::Handle_OP_SpellBookSwap;
 	ConnectedOpcodes[OP_BankPageSwap] = &Client::Handle_OP_BankPageSwap;
 	ConnectedOpcodes[OP_AdvLootAction] = &Client::Handle_OP_AdvLootAction;
+	ConnectedOpcodes[OP_InstanceAction] = &Client::Handle_OP_InstanceAction;
 	ConnectedOpcodes[OP_SaveOnZoneReq] = &Client::Handle_OP_SaveOnZoneReq;
 	ConnectedOpcodes[OP_SelectTribute] = &Client::Handle_OP_SelectTribute;
 	ConnectedOpcodes[OP_SenseHeading] = &Client::Handle_OP_SenseHeading;
@@ -533,6 +535,10 @@ void Client::CompleteConnect()
 	LoadPEQZoneFlags();
 	LoadZoneFlags();
 	LoadAccountFlags();
+
+	// akk-stack Private Zone Instancing: record this zone into the rolling last-3 list and, if we
+	// entered a private instance, stamp its per-zone replay lockout.
+	PrivateInstance::OnZoneEntry(this);
 
 	/* Sets GM flag if needed & Sends Petition Queue */
 	UpdateAdmin(false);
@@ -13856,6 +13862,17 @@ void Client::Handle_OP_BankPageSwap(const EQApplicationPacket *app)
 		target = 0;
 	}
 	SwapBankPage(target);
+}
+
+// akk-stack Private Zone Instancing: client->server action opcode (custom, RoF2 wire 0x7f0d).
+// Raw LE body (wire opcode already stripped -- PassDecoder, no rof2.cpp translation): [u8 action][args].
+// All logic lives in PrivateInstance::HandleAction; replies ride the OP_Marquee "INS" carrier.
+void Client::Handle_OP_InstanceAction(const EQApplicationPacket *app)
+{
+	if (!app || app->size < 1) {
+		return;
+	}
+	PrivateInstance::HandleAction(this, (const uint8_t *) app->pBuffer, app->size);
 }
 
 // akk-stack Advanced Looting: an item just left the corpse, so tell every advloot window that could be

@@ -74,6 +74,7 @@ set(zone_sources
     petitions.cpp
     pets.cpp
     position.cpp
+    private_instance.cpp
     qglobals.cpp
     queryserv.cpp
     quest_db.cpp
@@ -498,6 +499,7 @@ set(gm_command_sources
     gm_commands/petitems.cpp
     gm_commands/petname.cpp
     gm_commands/picklock.cpp
+    gm_commands/privateinstance.cpp
     gm_commands/profanity.cpp
     gm_commands/push.cpp
     gm_commands/raidloot.cpp
