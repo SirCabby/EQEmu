@@ -1022,6 +1022,10 @@ void Client::CompleteConnect()
 		GoToBind();
 		return;
 	}
+
+	// RESPAWNDBG (temporary diagnostic) — arrival state after a zone-in (incl. respawn-to-bind)
+	LogError("RESPAWNDBG arrival CompleteConnect: zone [{}] cur_hp [{}] max_hp [{}] dead [{}]",
+		zone ? zone->GetShortName() : "?", GetHP(), GetMaxHP(), dead ? 1 : 0);
 }
 
 // connecting opcode handlers
@@ -10367,6 +10371,10 @@ void Client::Handle_OP_LootRequest(const EQApplicationPacket *app)
 	}
 	else {
 		std::cout << "npc == 0 LOOTING FOOKED3" << std::endl;
+		// RESPAWNDBG (temporary diagnostic) — identify the fake "corpse" entity the client clicked.
+		LogError("RESPAWNDBG loot-not-corpse: id [{}] name [{}] isclient [{}] isnpc [{}] iscorpse [{}] ismob [{}]",
+			ent->GetID(), ent->GetName() ? ent->GetName() : "?",
+			ent->IsClient() ? 1 : 0, ent->IsNPC() ? 1 : 0, ent->IsCorpse() ? 1 : 0, ent->IsMob() ? 1 : 0);
 		Message(Chat::Red, "Error: OP_LootRequest: Corpse not a corpse?");
 		Corpse::SendLootReqErrorPacket(this);
 	}

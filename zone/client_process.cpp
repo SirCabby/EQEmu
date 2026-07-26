@@ -2158,6 +2158,10 @@ void Client::HandleRespawnFromHover(uint32 Option)
 {
 	RespawnFromHoverTimer.Disable();
 
+	// RESPAWNDBG (temporary diagnostic — remove after the respawn revive is understood)
+	LogError("RESPAWNDBG enter: Option [{}] cur_hp [{}] max_hp [{}] dead [{}] cur_zone [{}]",
+		Option, GetHP(), GetMaxHP(), dead ? 1 : 0, zone->GetZoneID());
+
 	RespawnOption* chosen = nullptr;
 	bool is_rez = false;
 
@@ -2239,7 +2243,9 @@ void Client::HandleRespawnFromHover(uint32 Option)
 			FastQueuePacket(&outapp);
 
 			ClearHover();
-			SendHPUpdate();
+			// AKK-STACK FIX: forced — see the non-rez branch below (unforced dedupes when
+			// last_hp was recorded while our entity id was still 0).
+			SendHPUpdate(true);
 			OPRezzAnswer(1, PendingRezzSpellID, zone->GetZoneID(), zone->GetInstanceID(), GetX(), GetY(), GetZ());
 
 			if (corpse && corpse->IsCorpse())
@@ -2257,6 +2263,9 @@ void Client::HandleRespawnFromHover(uint32 Option)
 		{
 			PendingRezzSpellID = 0;
 
+			LogError("RESPAWNDBG same-zone nonrez BEFORE revive: cur_hp [{}] max_hp [{}] dead [{}]",
+				GetHP(), GetMaxHP(), dead ? 1 : 0);
+
 			auto outapp = new EQApplicationPacket(OP_ZonePlayerToBind, sizeof(ZonePlayerToBind_Struct) +
 										       chosen->name.length() + 1);
 			ZonePlayerToBind_Struct* gmg = (ZonePlayerToBind_Struct*) outapp->pBuffer;
@@ -2272,6 +2281,12 @@ void Client::HandleRespawnFromHover(uint32 Option)
 			FastQueuePacket(&outapp);
 
 			CalcBonuses();
+			// AKK-STACK FIX: Client::SetMaxHP() (called by RestoreHealth) early-returns
+			// `if(dead)`, so with dead still true these restores were NO-OPS and the player
+			// kept cur_hp = -100 after "Return to Bind" -> flagged alive but stuck dead.
+			// Clear the dead flag FIRST so HP/mana/endurance actually restore; ClearHover()
+			// below then re-spawns the client with the restored (full) values.
+			dead = false;
 			RestoreHealth();
 			RestoreMana();
 			RestoreEndurance();
@@ -2283,7 +2298,24 @@ void Client::HandleRespawnFromHover(uint32 Option)
 
 			ClearHover();
 			entity_list.RefreshClientXTargets(this);
-			SendHPUpdate();
+			// AKK-STACK FIX: FORCED self-updates, sent only now that ClearHover assigned our
+			// new entity id. RestoreHealth()'s inner SendHPUpdate() fired while GetID() was
+			// still 0 (pre-ClearHover) — the client discards a spawn_id-0 update — and it
+			// recorded last_hp, so an unforced SendHPUpdate() here dedupes to nothing and the
+			// client's gauge stays at 0% until the next real HP change.
+			SendHPUpdate(true);
+			// The SELF mana/stamina gauges are driven by OP_ManaChange, which
+			// CheckManaEndUpdate() only sends when the values changed — and death never
+			// changes server-side mana/endurance (the 0% is purely the client zeroing its
+			// display). Bust the dedupe so the self update actually goes out.
+			last_reported_mana = -1;
+			last_reported_endurance = -1;
+			last_reported_mana_percent = -1;
+			last_reported_endurance_percent = -1;
+			CheckManaEndUpdate();
+
+			LogError("RESPAWNDBG same-zone nonrez AFTER revive+clearhover: cur_hp [{}] max_hp [{}] dead [{}]",
+				GetHP(), GetMaxHP(), dead ? 1 : 0);
 		}
 
 		//After they've respawned into the same zone, trigger EVENT_RESPAWN
@@ -2299,6 +2331,8 @@ void Client::HandleRespawnFromHover(uint32 Option)
 	else
 	{
 		//Heading to a different zone
+		LogError("RESPAWNDBG cross-zone: chosen_zone [{}] cur_hp [{}] max_hp [{}] dead [{}]",
+			chosen->zone_id, GetHP(), GetMaxHP(), dead ? 1 : 0);
 		if(isgrouped)
 		{
 			Group *g = GetGroup();
@@ -2326,6 +2360,13 @@ void Client::ClearHover()
 {
 	// Our Entity ID is currently zero, set in Client::Death
 	SetID(entity_list.GetFreeID());
+
+	// AKK-STACK FIX: entity_list keeps us keyed under our PRE-DEATH id (SetID never
+	// re-keys), which now belongs to our corpse — the stale entry shadows the corpse from
+	// loot lookups ("Corpse not a corpse?") and squats on the key when ids recycle. Queue
+	// a rekey to the new id; EntityList applies it at the next safe point (we are inside
+	// a mob_list Process() call right now, so the maps cannot be mutated here).
+	entity_list.QueueClientEntityRekey(this);
 
 	auto outapp = new EQApplicationPacket(OP_ZoneEntry, sizeof(ServerZoneEntry_Struct));
 	ServerZoneEntry_Struct* sze = (ServerZoneEntry_Struct*)outapp->pBuffer;

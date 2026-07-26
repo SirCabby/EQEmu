@@ -174,13 +174,11 @@ public:
 	}
 	Client *GetClientByName(const char* name);
 	Client *GetClientByAccID(uint32 accid);
-	inline Client *GetClientByID(uint16 id)
-	{
-		auto it = client_list.find(id);
-		if (it != client_list.end())
-			return it->second;
-		return nullptr;
-	}
+	// AKK-STACK FIX: defined in entity.cpp (needs complete Client for the stale-id
+	// guard — entries are keyed at insert time and Entity::SetID never re-keys, so
+	// after a death/hover-respawn id swap a stale-keyed entry can sit at this id,
+	// which now belongs to the player's corpse; only an exact id match is honored).
+	Client *GetClientByID(uint16 id);
 	Client *GetClientByCharID(uint32 iCharID);
 	Client *GetClientByWID(uint32 iWID);
 	Client *GetClientByLSID(uint32 iLSID);
@@ -564,6 +562,13 @@ public:
 	void	DepopAll(int NPCTypeID, bool StartSpawnTimer = true);
 
 	uint16 GetFreeID();
+	// AKK-STACK FIX (hover-respawn id rekey): Entity::SetID never re-keys client_list/
+	// mob_list, so after Death (corpse takes the old id) + ClearHover (client gets a new
+	// id) the client's entries stay under the STALE key — shadowing the corpse from loot
+	// lookups and colliding with future id reuse. ClearHover queues a rekey here; it is
+	// applied at the top of MobProcess (the safe point — never mid-iteration, since
+	// ClearHover itself runs inside a mob_list Process() call).
+	void QueueClientEntityRekey(Client *c);
 	void RefreshAutoXTargets(Client *c);
 	void RefreshClientXTargets(Client *c);
 	void SendAlternateAdvancementStats();
@@ -588,6 +593,11 @@ protected:
 private:
 	void	AddToSpawnQueue(uint16 entityid, NewSpawn_Struct** app);
 	void	CheckSpawnQueue();
+
+	// AKK-STACK FIX (hover-respawn id rekey) — see QueueClientEntityRekey.
+	void	ApplyClientEntityRekeys();
+	void	PurgeClientEntityRekey(const void *e);
+	std::vector<Client *> client_entity_rekeys;
 
 	//used for limiting spawns
 	class SpawnLimitRecord { public: uint32 spawngroup_id; uint32 npc_type; };

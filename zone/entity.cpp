@@ -461,6 +461,9 @@ void EntityList::MobProcess()
 {
 	bool mob_dead;
 
+	// AKK-STACK FIX (hover-respawn id rekey): safe point — no iterators exist yet.
+	ApplyClientEntityRekeys();
+
 	auto it = mob_list.begin();
 	while (it != mob_list.end()) {
 		uint16 id = it->first;
@@ -1006,7 +1009,11 @@ bool EntityList::MakeDoorSpawnPacket(EQApplicationPacket *app, Client *client)
 Entity *EntityList::GetEntityMob(uint16 id)
 {
 	auto it = mob_list.find(id);
-	if (it != mob_list.end())
+	// AKK-STACK FIX: entries are keyed at insert time and Entity::SetID never re-keys, so a
+	// death/hover-respawn id swap leaves a stale-keyed entry here while the id itself now
+	// belongs to the player's corpse. Only honor an exact id match — otherwise fall through
+	// (GetID()/GetMob() then find the corpse in corpse_list, making it lootable).
+	if (it != mob_list.end() && it->second && it->second->GetID() == id)
 		return it->second;
 	return nullptr;
 }
@@ -1297,6 +1304,84 @@ uint16 EntityList::GetFreeID()
 	uint16 newid = free_ids.front();
 	free_ids.pop();
 	return newid;
+}
+
+// AKK-STACK FIX: out-of-line so the stale-id guard can access complete Client
+// (see the declaration comment in entity.h).
+Client *EntityList::GetClientByID(uint16 id)
+{
+	auto it = client_list.find(id);
+	if (it != client_list.end() && it->second && it->second->GetID() == id)
+		return it->second;
+	return nullptr;
+}
+
+// AKK-STACK FIX (hover-respawn id rekey) — see the declaration in entity.h.
+// Queued by Client::ClearHover (which runs inside a mob_list Process() call, where the
+// maps must not be mutated); applied at the top of MobProcess, before iterators exist.
+void EntityList::QueueClientEntityRekey(Client *c)
+{
+	if (!c) {
+		return;
+	}
+	for (auto *queued : client_entity_rekeys) {
+		if (queued == c) {
+			return;
+		}
+	}
+	client_entity_rekeys.push_back(c);
+}
+
+void EntityList::ApplyClientEntityRekeys()
+{
+	if (client_entity_rekeys.empty()) {
+		return;
+	}
+
+	for (Client *c : client_entity_rekeys) {
+		// A client removed between queue and apply was purged from this vector
+		// (PurgeClientEntityRekey), so `c` is always live here.
+		const uint16 current_id = c->GetID();
+
+		// Died again before this ran (id back to 0): touch NOTHING. The client must keep
+		// its (stale-keyed) mob_list entry to keep being processed by MobProcess, and the
+		// stale-id lookup guards already neutralize the entries; the next ClearHover
+		// re-queues us with a real id.
+		if (current_id == 0) {
+			continue;
+		}
+
+		for (auto it = client_list.begin(); it != client_list.end();) {
+			if (it->second == c) {
+				it = client_list.erase(it);
+			} else {
+				++it;
+			}
+		}
+		for (auto it = mob_list.begin(); it != mob_list.end();) {
+			if (it->second == c) {
+				it = mob_list.erase(it);
+			} else {
+				++it;
+			}
+		}
+		// Re-insert under the CURRENT id so every later lookup/removal path agrees with
+		// GetID().
+		client_list.emplace(current_id, c);
+		mob_list.emplace(current_id, c);
+	}
+	client_entity_rekeys.clear();
+}
+
+void EntityList::PurgeClientEntityRekey(const void *e)
+{
+	for (auto it = client_entity_rekeys.begin(); it != client_entity_rekeys.end();) {
+		if ((const void *)*it == e) {
+			it = client_entity_rekeys.erase(it);
+		} else {
+			++it;
+		}
+	}
 }
 
 // if no language skill is specified, sent with 100 skill
@@ -2789,6 +2874,7 @@ bool EntityList::RemoveMob(uint16 delete_id)
 		else if (client_list.count(delete_id)) {
 			entity_list.RemoveClient(delete_id);
 		}
+		PurgeClientEntityRekey(it->second); // AKK-STACK FIX: the object is deleted right below
 		safe_delete(it->second);
 		if (!corpse_list.count(delete_id)) {
 			free_ids.push(it->first);
@@ -2965,6 +3051,7 @@ bool EntityList::RemoveClient(uint16 delete_id)
 {
 	auto it = client_list.find(delete_id);
 	if (it != client_list.end()) {
+		PurgeClientEntityRekey(it->second); // AKK-STACK FIX: never leave a pending rekey for a removed client
 		client_list.erase(it); // Already deleted
 		return true;
 	}
@@ -2974,6 +3061,7 @@ bool EntityList::RemoveClient(uint16 delete_id)
 // If our ID was deleted already
 bool EntityList::RemoveClient(Client *delete_client)
 {
+	PurgeClientEntityRekey(delete_client); // AKK-STACK FIX: never leave a pending rekey for a removed client
 	auto it = client_list.begin();
 	while (it != client_list.end()) {
 		if (it->second == delete_client) {
