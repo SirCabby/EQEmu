@@ -2154,6 +2154,21 @@ void Client::DoTracking()
 	}
 }
 
+// AKK-STACK: a respawn that is NOT a resurrection always puts the player back on their
+// feet at full health/mana/endurance. Only accepting a rez may leave them at partial
+// values (the rez itself decides those). Callers must use this instead of poking
+// RestoreHealth() directly: Client::SetMaxHP() early-returns `if(dead)` and
+// Client::Process() re-stamps SetHP(-100) every tick while `dead` is set, so the restores
+// are silent no-ops unless the dead flag is cleared first.
+void Client::ReviveForRespawn()
+{
+	dead = false;
+	CalcBonuses();
+	RestoreHealth();
+	RestoreMana();
+	RestoreEndurance();
+}
+
 void Client::HandleRespawnFromHover(uint32 Option)
 {
 	RespawnFromHoverTimer.Disable();
@@ -2280,16 +2295,11 @@ void Client::HandleRespawnFromHover(uint32 Option)
 
 			FastQueuePacket(&outapp);
 
-			CalcBonuses();
-			// AKK-STACK FIX: Client::SetMaxHP() (called by RestoreHealth) early-returns
-			// `if(dead)`, so with dead still true these restores were NO-OPS and the player
+			// AKK-STACK FIX: clears `dead` FIRST, then restores. With dead still true the
+			// restores were NO-OPS (Client::SetMaxHP early-returns `if(dead)`) and the player
 			// kept cur_hp = -100 after "Return to Bind" -> flagged alive but stuck dead.
-			// Clear the dead flag FIRST so HP/mana/endurance actually restore; ClearHover()
-			// below then re-spawns the client with the restored (full) values.
-			dead = false;
-			RestoreHealth();
-			RestoreMana();
-			RestoreEndurance();
+			// ClearHover() below then re-spawns the client with the restored (full) values.
+			ReviveForRespawn();
 
 			m_Position.x = chosen->x;
 			m_Position.y = chosen->y;
@@ -2347,6 +2357,13 @@ void Client::HandleRespawnFromHover(uint32 Option)
 		m_pp.zone_id = chosen->zone_id;
 		m_pp.zoneInstance = chosen->instance_id;
 		database.MoveCharacterToZone(CharacterID(), chosen->zone_id);
+
+		// AKK-STACK FIX: restore BEFORE the Save() that the destination zone loads from, so a
+		// bind in another zone lands at full HP/mana/endurance just like a same-zone bind.
+		// Stock only got there by way of Save()'s `if (dead && GetHP() <= 0)` branch, which
+		// forces full HP but leaves mana/endurance to the Character:FullManaOnDeath /
+		// FullEndurOnDeath rules; this makes it unconditional.
+		ReviveForRespawn();
 
 		Save();
 
