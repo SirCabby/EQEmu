@@ -57,6 +57,8 @@
 #include "zone/zone.h"
 
 #include "zlib.h"
+
+#include <algorithm>
 #include <cstdio>
 #include <iomanip>
 #include <iostream>
@@ -1022,6 +1024,12 @@ void Client::CompleteConnect()
 		GoToBind();
 		return;
 	}
+
+	// akk-stack Advanced Looting: rebuild the advloot window for THIS zone. The client's row list only
+	// ever shrinks on a server push, and every push is addressed by zone-local corpse entity id, so
+	// anything left over from the zone we just came from is stale (and its ids may name other corpses
+	// here). One resync per zone-in: clear, then re-list whatever is still live and ours.
+	adv_loot_rolls.SendListTo(this);
 
 	// RESPAWNDBG (temporary diagnostic) — arrival state after a zone-in (incl. respawn-to-bind)
 	LogError("RESPAWNDBG arrival CompleteConnect: zone [{}] cur_hp [{}] max_hp [{}] dead [{}]",
@@ -13917,6 +13925,8 @@ static void AdvLootBroadcastRemoved(Client *actor, uint16 corpse_id, uint32 adv_
 // "ALW6|<item_id>,<icon>,<mode>,<sell>,<value>,<name>|..." over the OP_Marquee carrier. mode is the roll
 // action (0 never / 1 always-need / 2 always-greed / 3 none), sell is the always-sell flag, value is the
 // merchant price in copper. Every saved row is listed (a sell-only row has mode 3). Capped at 20.
+// Rows go out sorted by item NAME (the client renders them in receive order), so the name sort has to
+// happen here -- the name lives in the item cache, not in `character_loot_never`, so the DB can't do it.
 static void AdvSendPrefList(Client *c)
 {
 	if (!c) {
@@ -13924,32 +13934,67 @@ static void AdvSendPrefList(Client *c)
 	}
 
 	auto rows = database.QueryDatabase(fmt::format(
-		"SELECT `item_id`, `mode`, `sell` FROM `character_loot_never` WHERE `character_id` = {} ORDER BY `item_id`",
+		"SELECT `item_id`, `mode`, `sell` FROM `character_loot_never` WHERE `character_id` = {}",
 		c->CharacterID()
 	));
 
-	std::string msg   = "ALW6"; // leading marker with no record = "your list is empty, clear it"
-	int         count = 0;
+	struct AdvPrefRow {
+		uint32      item_id;
+		uint32      icon;
+		uint8       mode;
+		uint8       sell;
+		uint32      price;
+		std::string name;
+		std::string sort_key; // lowercased name, so the sort is case-insensitive
+	};
+
+	std::vector<AdvPrefRow> prefs;
 	for (auto row : rows) {
 		const uint32        item_id = (uint32) atoi(row[0]);
-		const uint8         mode    = (uint8) atoi(row[1]);
-		const uint8         sell    = (uint8) atoi(row[2]);
 		const EQ::ItemData *item    = database.GetItem(item_id);
 		if (!item) {
 			continue;
 		}
+		AdvPrefRow p{
+			item_id,
+			(uint32) item->Icon,
+			(uint8) atoi(row[1]),
+			(uint8) atoi(row[2]),
+			(uint32) item->Price,
+			item->Name,
+			item->Name
+		};
+		for (auto &ch : p.sort_key) {
+			ch = (char) std::tolower((unsigned char) ch);
+		}
+		prefs.emplace_back(std::move(p));
+	}
+
+	std::sort(
+		prefs.begin(), prefs.end(),
+		[](const AdvPrefRow &a, const AdvPrefRow &b) {
+			if (a.sort_key != b.sort_key) {
+				return a.sort_key < b.sort_key;
+			}
+			return a.item_id < b.item_id; // stable order for same-named items
+		}
+	);
+
+	std::string msg   = "ALW6"; // leading marker with no record = "your list is empty, clear it"
+	int         count = 0;
+	for (const auto &p : prefs) {
 		msg += "|";
-		msg += std::to_string(item_id);
+		msg += std::to_string(p.item_id);
 		msg += ",";
-		msg += std::to_string((unsigned) item->Icon);
+		msg += std::to_string((unsigned) p.icon);
 		msg += ",";
-		msg += std::to_string((unsigned) mode);
+		msg += std::to_string((unsigned) p.mode);
 		msg += ",";
-		msg += std::to_string((unsigned) sell);
+		msg += std::to_string((unsigned) p.sell);
 		msg += ",";
-		msg += std::to_string((unsigned) item->Price);
+		msg += std::to_string((unsigned) p.price);
 		msg += ",";
-		msg += item->Name;
+		msg += p.name;
 		if (++count >= 20) {
 			break;
 		}
@@ -13997,7 +14042,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 				"DELETE FROM `character_loot_never` WHERE `character_id` = {} AND `item_id` = {} AND `mode` = 3 AND `sell` = 0",
 				CharacterID(), pref_item
 			));
-			Message(Chat::Yellow, "[AdvLoot] Cleared the saved action for %s.",
+			Message(Chat::White, "[AdvLoot] Cleared the saved action for %s.",
 					pref_id ? pref_id->Name : "that item");
 		}
 		else if (pref_mode <= 3) {
@@ -14012,7 +14057,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 			const char *word = pref_mode == 0 ? "Never" :
 			                   pref_mode == 1 ? "always Need" :
 			                   pref_mode == 2 ? "always Greed" : "no auto roll action";
-			Message(Chat::Yellow, "[AdvLoot] %s: %s.", pref_id ? pref_id->Name : "that item", word);
+			Message(Chat::White, "[AdvLoot] %s: %s.", pref_id ? pref_id->Name : "that item", word);
 			if (pref_mode != 3) {
 				// apply it to any live roll on this item right now (e.g. it is sitting in the window)
 				adv_loot_rolls.ApplyPrefToLive(this, pref_item, pref_mode);
@@ -14048,7 +14093,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 				CharacterID(), sell_item
 			));
 		}
-		Message(Chat::Yellow, "[AdvLoot] %s will %s be auto-sold when looted.",
+		Message(Chat::White, "[AdvLoot] %s will %s be auto-sold when looted.",
 				sell_id ? sell_id->Name : "that item", sell_on ? "now" : "no longer");
 		return;
 	}
@@ -14096,7 +14141,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 	// DENY_AUTOSPLIT (23) -- toggle opting out of coin auto-split; body [u8 action][u8 deny] (1/0).
 	if (action == 23 && app->size >= 2) {
 		SetAdvLootDeniesSplit(b[1] != 0);
-		Message(Chat::Yellow, "[AdvLoot] You will %s coin from group auto-split.",
+		Message(Chat::White, "[AdvLoot] You will %s coin from group auto-split.",
 				b[1] != 0 ? "no longer receive" : "again receive");
 		return;
 	}
@@ -14127,11 +14172,11 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 
 		Group *adv_g = GetGroup();
 		if (!adv_g) {
-			Message(Chat::Yellow, "[AdvLoot] You are not in a group.");
+			Message(Chat::White, "[AdvLoot] You are not in a group.");
 			return;
 		}
 		if (!adv_g->IsLeader(this)) {
-			Message(Chat::Yellow, "[AdvLoot] Only the group leader can set the master looter.");
+			Message(Chat::White, "[AdvLoot] Only the group leader can set the master looter.");
 			return;
 		}
 
@@ -14165,7 +14210,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 				}
 			}
 			if (!adv_member) {
-				Message(Chat::Yellow, "[AdvLoot] %s is not in your group.", adv_name.c_str());
+				Message(Chat::White, "[AdvLoot] %s is not in your group.", adv_name.c_str());
 				return;
 			}
 			adv_g->DelegateMasterLooter(adv_name.c_str(), 1);
@@ -14175,7 +14220,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 			// legacy /advloot ml: designate the current target
 			Mob *adv_t = GetTarget();
 			if (!adv_t || !adv_t->IsClient() || adv_t->CastToClient()->GetGroup() != adv_g) {
-				Message(Chat::Yellow, "[AdvLoot] Target a group member to make them master looter.");
+				Message(Chat::White, "[AdvLoot] Target a group member to make them master looter.");
 				return;
 			}
 			adv_g->DelegateMasterLooter(adv_t->GetCleanName(), 1);
@@ -14190,7 +14235,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 			}
 			Client *adv_gc = adv_gm->CastToClient();
 			if (adv_clear) {
-				adv_gc->Message(Chat::Yellow, "[AdvLoot] %s controls this group's loot.", adv_who.c_str());
+				adv_gc->Message(Chat::White, "[AdvLoot] %s controls this group's loot.", adv_who.c_str());
 			}
 			adv_gc->SendMarqueeMessage(0, adv_g->IsLootController(adv_gc) ? "ALW4|1" : "ALW4|0", 1000);
 			adv_g->SendAdvLootLooterList(adv_gc);
@@ -14220,7 +14265,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 
 		Group *adv_cg = GetGroup();
 		if (adv_cg && !adv_cg->IsLootController(this)) {
-			Message(Chat::Yellow, "[AdvLoot] Only your group's loot controller can lock loot.");
+			Message(Chat::White, "[AdvLoot] Only your group's loot controller can lock loot.");
 			return;
 		}
 		adv_loot_rolls.SetLocked(lock_corpse, lock_uid, action == 8);
@@ -14233,6 +14278,15 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 
 		Corpse *corpse = entity_list.GetCorpseByID(corpse_id);
 		if (!corpse) {
+			// The row outlived its corpse -- normally impossible (Process() sweeps rotted corpses and
+			// the zone-in resync rebuilds the list), so treat it as a desync rather than a silent
+			// no-op: say so and clear the row instead of leaving a button that does nothing forever.
+			Message(Chat::White, "[AdvLoot] That corpse is gone -- removing it from your list.");
+			SendMarqueeMessage(
+				0,
+				fmt::format("ALW2|{},{}", corpse_id, adv_uid),
+				1000
+			);
 			return;
 		}
 
@@ -14245,14 +14299,14 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 		if (action == 6) {
 			Group *adv_cg = GetGroup();
 			if (adv_cg && !adv_cg->IsLootController(this)) {
-				Message(Chat::Yellow, "[AdvLoot] Only your group's loot controller can hand out loot.");
+				Message(Chat::White, "[AdvLoot] Only your group's loot controller can hand out loot.");
 				return;
 			}
 		}
 		else if (action == 0 || action == 26) {
 			Group *adv_cg = GetGroup();
 			if (adv_cg && !adv_cg->IsLootController(this) && adv_loot_rolls.IsLocked(corpse_id, adv_uid)) {
-				Message(Chat::Yellow, "[AdvLoot] That item is locked by the master looter.");
+				Message(Chat::White, "[AdvLoot] That item is locked by the master looter.");
 				return;
 			}
 		}
@@ -14272,7 +14326,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 		else if (action == 6) { // ASSIGN/GIVE -- hand the item to my current target
 			Mob *adv_t = GetTarget();
 			if (!adv_t || !adv_t->IsClient()) {
-				Message(Chat::Yellow, "[AdvLoot] Target a group member to give that item to.");
+				Message(Chat::White, "[AdvLoot] Target a group member to give that item to.");
 				return;
 			}
 
@@ -14285,7 +14339,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 				adv_ok = true;
 			}
 			if (!adv_ok) {
-				Message(Chat::Yellow, "[AdvLoot] %s is not in your group or raid.", adv_tc->GetName());
+				Message(Chat::White, "[AdvLoot] %s is not in your group or raid.", adv_tc->GetName());
 				return;
 			}
 
@@ -14312,7 +14366,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 			else {
 				// quest veto or DZ lockout on the receiver (they were messaged) -- the drop stays put
 				Message(
-					Chat::Yellow, "[AdvLoot] %s could not take %s -- it stays on the corpse.",
+					Chat::White, "[AdvLoot] %s could not take %s -- it stays on the corpse.",
 					adv_tc->GetName(), adv_item ? adv_item->Name : "that item"
 				);
 			}
@@ -14326,7 +14380,7 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 					CharacterID(), item_id
 				));
 				const EQ::ItemData *item = database.GetItem(item_id);
-				Message(Chat::Yellow, "[AdvLoot] Won't auto-list %s again.", item ? item->Name : "that item");
+				Message(Chat::White, "[AdvLoot] Won't auto-list %s again.", item ? item->Name : "that item");
 			}
 		}
 	}

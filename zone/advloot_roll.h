@@ -47,6 +47,9 @@ namespace AdvLootPref {
 // straight to the winner (the same out-of-range transfer the Loot button uses), so nobody has to be
 // near the corpse. Ties are impossible: each voter draws a d1000 as they vote.
 //
+// A LORE drop the top roller already owns would just bounce off their inventory, so it passes on down
+// the ranking to the highest roller who does NOT have one (see Resolve).
+//
 // A roll has no deadline of its own -- it lives exactly as long as the corpse does. If the corpse
 // rots before it resolves, the item rots with it and the row disappears from every window. That
 // decay clock is what the window's per-row timer counts down.
@@ -106,6 +109,14 @@ public:
 	// per-row timers / tallies.
 	void Process();
 
+	// Rebuild this client's whole advloot window from live zone state. Sends "ALW0" (drop every row)
+	// followed by an ALW1 push of the still-open drops they are eligible for in THIS zone, then each
+	// row's tally. Called at zone-in: the client's row list is a plain accumulator that only shrinks on
+	// a server push, and every push is addressed by zone-local entity id, so rows from the zone the
+	// player just left are both stale AND dangerously ambiguous (entity ids get recycled). One resync
+	// per zone-in keeps the window honest.
+	void SendListTo(Client *c);
+
 	// Whole seconds left before this corpse rots (0 if it is gone or has no decay timer running).
 	static uint32 CorpseSecondsLeft(uint16 corpse_id);
 
@@ -129,7 +140,8 @@ private:
 	Session *Find(uint16 corpse_id, uint32 adv_uid);
 	void     Resolve(Session &s);
 	void     Erase(const Session *s);
-	void     SendTally(const Session &s); // push tally + lock + corpse-seconds to the row (ALW5)
+	void     SendTally(const Session &s);                    // push the row's tally to every eligible looter
+	void     SendTallyTo(const Session &s, Client *c);       // ...to one of them (ALW5; voted flag is per-player)
 	void     SendRowRemoved(const Session &s);
 	void     Announce(const Session &s, const std::string &message);
 

@@ -1141,7 +1141,7 @@ bool Corpse::AdvLootItem(Client *c, uint32 adv_uid)
 		const uint32 price = item->Price;
 		c->AddMoneyToPP(price % 10, (price / 10) % 10, (price / 100) % 10, price / 1000, true);
 		c->Message(
-			Chat::MoneySplit, "[AdvLoot] Auto-sold %s for %s.", item->Name,
+			Chat::White, "[AdvLoot] Auto-sold %s for %s.", item->Name,
 			Strings::Money(price / 1000, (price / 100) % 10, (price / 10) % 10, price % 10).c_str()
 		);
 	}
@@ -1244,7 +1244,7 @@ bool Corpse::AdvSellItem(Client *c, uint32 adv_uid)
 	const uint32 price = item->Price;
 	c->AddMoneyToPP(price % 10, (price / 10) % 10, (price / 100) % 10, price / 1000, true);
 	c->Message(
-		Chat::MoneySplit, "[AdvLoot] Sold %s for %s.", item->Name,
+		Chat::White, "[AdvLoot] Sold %s for %s.", item->Name,
 		Strings::Money(price / 1000, (price / 100) % 10, (price / 10) % 10, price % 10).c_str()
 	);
 
@@ -1540,7 +1540,7 @@ void Corpse::MakeLootRequestPackets(Client *c, const EQApplicationPacket *app)
 		Group *adv_g = c->GetGroup();
 		if (!(adv_g && adv_g->IsLootController(c))) {
 			SendLootReqErrorPacket(c, LootResponse::SomeoneElse);
-			c->Message(Chat::Yellow, "[AdvLoot] This corpse's loot is locked by the master looter.");
+			c->Message(Chat::White, "[AdvLoot] This corpse's loot is locked by the master looter.");
 			return;
 		}
 	}

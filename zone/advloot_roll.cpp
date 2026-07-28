@@ -46,6 +46,18 @@ static std::string adv_item_link(uint32 item_id, const std::string &fallback)
 	return linker.GenerateLink();
 }
 
+// Does this player's saved preference auto-sell this item on loot? An auto-sold win is paid out as
+// coin and never enters inventory, so -- exactly like AdvLootItem -- it is exempt from the lore check.
+static bool adv_always_sells(uint32 character_id, uint32 item_id)
+{
+	auto rs = database.QueryDatabase(fmt::format(
+		"SELECT `sell` FROM `character_loot_never` WHERE `character_id` = {} AND `item_id` = {}",
+		character_id, item_id
+	));
+
+	return rs.Success() && rs.RowCount() && atoi(rs.begin()[0]) != 0;
+}
+
 uint32 AdvLootRollManager::CorpseSecondsLeft(uint16 corpse_id)
 {
 	Corpse *corpse = entity_list.GetCorpseByID(corpse_id);
@@ -88,16 +100,22 @@ void AdvLootRollManager::Announce(const Session &s, const std::string &message)
 	for (const uint32 character_id : s.eligible) {
 		Client *c = entity_list.GetClientByCharID(character_id);
 		if (c) {
-			c->Message(Chat::Yellow, message.c_str());
+			c->Message(Chat::White, message.c_str());
 		}
 	}
 }
 
-// "ALW5|<corpse_id>,<adv_uid>,<need>,<greed>,<secs>,<locked>" -- the row's live tally, the whole
-// seconds left before the corpse rots (the window's per-row countdown), and whether the controller has
-// locked it out of rolling.
-void AdvLootRollManager::SendTally(const Session &s)
+// "ALW5|<corpse_id>,<adv_uid>,<need>,<greed>,<secs>,<locked>,<voted>" -- the row's live tally, the
+// whole seconds left before the corpse rots (the window's per-row countdown), whether the controller
+// has locked it out of rolling, and whether THIS recipient has already answered. The voted flag is the
+// only per-player field, and it is what lets a resynced window (zone-in) know which rows still want an
+// answer -- the client's own click-time flag does not survive the rebuild.
+void AdvLootRollManager::SendTallyTo(const Session &s, Client *c)
 {
+	if (!c) {
+		return;
+	}
+
 	uint32 need  = 0;
 	uint32 greed = 0;
 	for (const auto &v : s.votes) {
@@ -109,21 +127,26 @@ void AdvLootRollManager::SendTally(const Session &s)
 		}
 	}
 
-	const std::string msg = fmt::format(
-		"ALW5|{},{},{},{},{},{}",
-		s.corpse_id,
-		s.adv_uid,
-		need,
-		greed,
-		CorpseSecondsLeft(s.corpse_id),
-		s.locked ? 1 : 0
+	c->SendMarqueeMessage(
+		0,
+		fmt::format(
+			"ALW5|{},{},{},{},{},{},{}",
+			s.corpse_id,
+			s.adv_uid,
+			need,
+			greed,
+			CorpseSecondsLeft(s.corpse_id),
+			s.locked ? 1 : 0,
+			s.votes.count(c->CharacterID()) ? 1 : 0
+		),
+		1000
 	);
+}
 
+void AdvLootRollManager::SendTally(const Session &s)
+{
 	for (const uint32 character_id : s.eligible) {
-		Client *c = entity_list.GetClientByCharID(character_id);
-		if (c) {
-			c->SendMarqueeMessage(0, msg, 1000);
-		}
+		SendTallyTo(s, entity_list.GetClientByCharID(character_id));
 	}
 }
 
@@ -209,7 +232,7 @@ void AdvLootRollManager::Cast(Client *voter, uint16 corpse_id, uint32 adv_uid, V
 	}
 
 	if (s->votes.count(character_id)) {
-		voter->Message(Chat::Yellow, "[AdvLoot] You have already rolled on %s.", adv_item_link(s->item_id, s->item_name).c_str());
+		voter->Message(Chat::White, "[AdvLoot] You have already rolled on %s.", adv_item_link(s->item_id, s->item_name).c_str());
 		return;
 	}
 
@@ -304,12 +327,19 @@ void AdvLootRollManager::ApplyPrefToLive(Client *c, uint32 item_id, uint8 mode)
 
 void AdvLootRollManager::Resolve(Session &s)
 {
-	// Highest Need roll wins; only if nobody needed does Greed get a look in. Pass never wins.
-	uint32 winner_id = 0;
-	int    best      = 0;
-	uint8  best_vote = VoteNone;
+	Corpse *corpse = entity_list.GetCorpseByID(s.corpse_id);
 
+	// Rank the rollers: every Need (highest first), then every Greed (highest first). A Need beats
+	// every Greed outright, so the two tiers are simply walked in order. Pass never wins.
+	struct Candidate {
+		uint32 character_id;
+		int    roll;
+		uint8  vote;
+	};
+
+	std::vector<Candidate> ranked;
 	for (const uint8 wanted : {VoteNeed, VoteGreed}) {
+		std::vector<Candidate> tier;
 		for (const auto &v : s.votes) {
 			if (v.second != wanted) {
 				continue;
@@ -320,32 +350,67 @@ void AdvLootRollManager::Resolve(Session &s)
 				continue;
 			}
 
-			if (r->second > best) {
-				best      = r->second;
-				winner_id = v.first;
-				best_vote = wanted;
-			}
+			tier.push_back({v.first, r->second, wanted});
 		}
 
-		if (winner_id) {
-			break; // a Need beats every Greed outright
+		std::sort(tier.begin(), tier.end(), [](const Candidate &a, const Candidate &b) { return a.roll > b.roll; });
+		ranked.insert(ranked.end(), tier.begin(), tier.end());
+	}
+
+	// Walk that ranking and award the drop to the highest roller who can actually hold it. A LORE item
+	// the roller already owns would just bounce off their inventory and the whole roll would be wasted,
+	// so it falls through to the next-highest roller who does NOT have one. (A win that gets converted
+	// to coin -- single-sell or the persistent always-sell -- never enters inventory, so it is
+	// lore-exempt, the same carve-out AdvLootItem makes.)
+	uint32 winner_id  = 0;
+	int    best       = 0;
+	uint8  best_vote  = VoteNone;
+	bool   sell       = false;
+	bool   lore_skips = false;
+
+	for (const auto &cand : ranked) {
+		Client *c = entity_list.GetClientByCharID(cand.character_id);
+
+		const bool cand_sell =
+			std::find(s.sell_on_win.begin(), s.sell_on_win.end(), cand.character_id) != s.sell_on_win.end();
+
+		if (c && corpse && !cand_sell && corpse->AdvLoreBlocked(c, s.adv_uid) &&
+			!adv_always_sells(cand.character_id, s.item_id)) {
+			Announce(
+				s,
+				fmt::format("[AdvLoot] {} rolled {} but already has a lore {} -- passing to the next roller.",
+							c->GetCleanName(), cand.roll, adv_item_link(s.item_id, s.item_name))
+			);
+			lore_skips = true;
+			continue;
 		}
+
+		winner_id = cand.character_id;
+		best      = cand.roll;
+		best_vote = cand.vote;
+		sell      = cand_sell;
+		break;
 	}
 
 	if (!winner_id) {
-		Announce(s, fmt::format("[AdvLoot] Everyone passed on {} -- it stays on the corpse.", adv_item_link(s.item_id, s.item_name)));
-		SendRowRemoved(s); // nobody wanted it; clear the decided row from every window
+		Announce(
+			s,
+			lore_skips
+				? fmt::format("[AdvLoot] Everyone who rolled on {} already has one -- it stays on the corpse.",
+							  adv_item_link(s.item_id, s.item_name))
+				: fmt::format("[AdvLoot] Everyone passed on {} -- it stays on the corpse.",
+							  adv_item_link(s.item_id, s.item_name))
+		);
+		SendRowRemoved(s); // nobody can take it; clear the decided row from every window
 		return;
 	}
 
 	Client *winner = entity_list.GetClientByCharID(winner_id);
-	Corpse *corpse = entity_list.GetCorpseByID(s.corpse_id);
 
 	// If the winner flagged this drop for single-sell, hand them coin instead of the item (AdvSellItem);
 	// otherwise loot it normally (AdvLootItem already honors their persistent "always sell").
-	const bool sell = std::find(s.sell_on_win.begin(), s.sell_on_win.end(), winner_id) != s.sell_on_win.end();
-	const bool ok   = winner && corpse &&
-	                  (sell ? corpse->AdvSellItem(winner, s.adv_uid) : corpse->AdvLootItem(winner, s.adv_uid));
+	const bool ok = winner && corpse &&
+	                (sell ? corpse->AdvSellItem(winner, s.adv_uid) : corpse->AdvLootItem(winner, s.adv_uid));
 
 	if (!ok) {
 		Announce(s, fmt::format("[AdvLoot] {} could not be awarded -- it stays on the corpse.", adv_item_link(s.item_id, s.item_name)));
@@ -396,5 +461,113 @@ void AdvLootRollManager::Process()
 			}
 		}
 		SendTally(s);
+	}
+}
+
+// Rebuild one client's window from live zone state (see the header). The record format is byte-for-byte
+// the death-time push in attack.cpp -- the client parses ALW1 one way -- so the two must stay in step.
+void AdvLootRollManager::SendListTo(Client *c)
+{
+	if (!c) {
+		return;
+	}
+
+	// Always first: drop whatever the window is still holding. Rows survive zoning client-side (the .asi
+	// lives for the whole client process), so without this a player carries the last zone's list around,
+	// and its corpse entity ids may now name entirely different corpses here.
+	c->SendMarqueeMessage(0, "ALW0", 1000);
+
+	const uint32 character_id = c->CharacterID();
+	Group       *group        = c->GetGroup();
+
+	// The Looter dropdown is window state too, and the group may have changed while they were away.
+	// Unconditional: solo, the client needs the explicit "ALWg|0" to stop believing it is still grouped.
+	if (group) {
+		group->SendAdvLootLooterList(c);
+	}
+	else {
+		c->SendMarqueeMessage(0, "ALWg|0", 1000);
+	}
+
+	// Which of this zone's open drops is this player part of? Sessions exist for exactly the rows that
+	// belong on a window, and each carries the audience it was opened against.
+	std::vector<Session *> mine;
+	for (auto &s : m_sessions) {
+		if (std::find(s.eligible.begin(), s.eligible.end(), character_id) == s.eligible.end()) {
+			continue;
+		}
+		if (!entity_list.GetCorpseByID(s.corpse_id)) {
+			continue; // rotting corpse not swept yet; Process() will erase the session on its next tick
+		}
+		mine.push_back(&s);
+	}
+
+	if (mine.empty()) {
+		return; // nothing here for them -- the clear above is the whole message (an empty ALW1 would
+		        // pop the window open on every zone-in)
+	}
+
+	// Their saved per-item actions, same as the death push: mode 0 = never (don't list it at all).
+	std::map<uint32, uint8> pref;
+	std::map<uint32, uint8> sell;
+	{
+		auto rows = database.QueryDatabase(fmt::format(
+			"SELECT `item_id`, `mode`, `sell` FROM `character_loot_never` WHERE `character_id` = {}",
+			character_id
+		));
+		for (auto row : rows) {
+			const uint32 item_id = (uint32) atoi(row[0]);
+			pref[item_id] = (uint8) atoi(row[1]);
+			sell[item_id] = (uint8) atoi(row[2]);
+		}
+	}
+
+	const int hdr = ((group ? group->IsLootController(c) : true) ? 1 : 0) | (group ? 2 : 0);
+
+	std::string            msg = "ALW1|" + std::to_string(hdr);
+	std::vector<Session *> sent;
+	for (auto *s : mine) {
+		const auto  pit  = pref.find(s->item_id);
+		const bool  has  = (pit != pref.end());
+		const uint8 mode = has ? pit->second : 0;
+		if (has && mode == 0) {
+			continue; // never: they asked not to see it
+		}
+
+		const EQ::ItemData *item = database.GetItem(s->item_id);
+		if (!item) {
+			continue;
+		}
+
+		Corpse *corpse = entity_list.GetCorpseByID(s->corpse_id);
+
+		msg += fmt::format(
+			"|{},{},{},{},{},{},{},{},{}",
+			s->corpse_id,
+			s->adv_uid,
+			s->item_id,
+			(unsigned) (has ? mode : 255),
+			(unsigned) ((has && sell.count(s->item_id)) ? sell[s->item_id] : 0),
+			(unsigned) item->Icon,
+			(unsigned) item->Price,
+			corpse ? corpse->GetCleanName() : "a corpse",
+			item->Name
+		);
+
+		sent.push_back(s);
+		if (sent.size() >= 20) {
+			break;
+		}
+	}
+
+	if (sent.empty()) {
+		return;
+	}
+
+	c->SendMarqueeMessage(0, msg, 1000);
+
+	// Countdown, lock state, and (per-player) whether they have already answered each roll.
+	for (auto *s : sent) {
+		SendTallyTo(*s, c);
 	}
 }
