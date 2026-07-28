@@ -178,6 +178,7 @@ public:
 	void RemoveItem(LootItem *item_data);
 	void RemoveItemByID(uint32 item_id, int quantity = 1);
 	bool AdvLootItem(Client *c, uint32 adv_uid);        // akk-stack advanced looting: move one item corpse->inventory (no proximity/window), keyed on the stable per-corpse LootItem::adv_uid
+	bool AdvLoreBlocked(Client *c, uint32 adv_uid);     // akk-stack advanced looting: would delivering this drop to the player hit a lore conflict? (pre-check so Give can tell the sender why)
 	bool AdvSellItem(Client *c, uint32 adv_uid);        // akk-stack advanced looting: remove one item and pay the player its merchant price (no merchant)
 	uint32 AdvItemId(uint32 adv_uid) const;             // akk-stack advanced looting: item_id of the drop with this adv_uid (0 if gone)
 	void   AdvAssignUids();                             // akk-stack advanced looting: lazily number this corpse's drops 1..N (idempotent)

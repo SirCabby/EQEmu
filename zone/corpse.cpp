@@ -933,7 +933,10 @@ void Corpse::RemoveItem(LootItem *item_data)
 // -- no proximity check, no native loot window. Driven by the advloot window's Loot button
 // (Client::Handle_OP_AdvLootAction). The item is identified by its LootItem::adv_uid (stable and
 // unique per corpse -- equip_slot is -1 for nearly every drop). Mirrors the item-instance +
-// inventory-put + removal core of Corpse::LootCorpseItem.
+// inventory-put + removal core of Corpse::LootCorpseItem, plus its quest machinery: EVENT_LOOT /
+// EVENT_LOOT_ZONE scripts and dynamic-zone lockouts can veto (return false = the drop stays on the
+// corpse, which every caller already handles), and looting advances Loot-type task activities,
+// item discovery, adventure collects, and the player event log.
 bool Corpse::AdvLootItem(Client *c, uint32 adv_uid)
 {
 	if (!c) {
@@ -987,6 +990,7 @@ bool Corpse::AdvLootItem(Client *c, uint32 adv_uid)
 
 	// akk-stack Advanced Looting: if this player set "always sell" for the item, convert it straight to
 	// its merchant price instead of putting it in a bag (no merchant needed -- just the item's Price).
+	// Resolved up front: an auto-sold item never enters inventory, so it is exempt from the lore check.
 	bool adv_auto_sold = false;
 	{
 		auto adv_rs = database.QueryDatabase(fmt::format(
@@ -998,6 +1002,141 @@ bool Corpse::AdvLootItem(Client *c, uint32 adv_uid)
 		}
 	}
 
+	// native-window parity: never deliver a lore duplicate -- the receiving player gets the standard
+	// lore error and the drop stays on the corpse (false; the Give sender is told at the call site)
+	if (!adv_auto_sold) {
+		if (c->CheckLoreConflict(item)) {
+			c->MessageString(Chat::White, LOOT_LORE_ERROR);
+			safe_delete(inst);
+			return false;
+		}
+
+		if (inst->IsAugmented()) {
+			for (int i = EQ::invaug::SOCKET_BEGIN; i <= EQ::invaug::SOCKET_END; i++) {
+				EQ::ItemInstance *aug = inst->GetAugment(i);
+				if (aug && c->CheckLoreConflict(aug->GetItem())) {
+					c->MessageString(Chat::White, LOOT_LORE_ERROR);
+					safe_delete(inst);
+					return false;
+				}
+			}
+		}
+	}
+
+	// quest hooks may veto the loot (native-window parity); they run BEFORE anything moves so a veto
+	// leaves the corpse untouched -- including the auto-sell conversion below
+	bool prevent_loot = false;
+
+	if (RuleB(Zone, UseZoneController)) {
+		auto controller = entity_list.GetNPCByNPCTypeID(ZONE_CONTROLLER_NPC_ID);
+		if (controller && parse->HasQuestSub(ZONE_CONTROLLER_NPC_ID, EVENT_LOOT_ZONE)) {
+			const auto &export_string = fmt::format(
+				"{} {} {} {}",
+				inst->GetItem()->ID,
+				inst->GetCharges(),
+				EntityList::RemoveNumbers(corpse_name),
+				GetID()
+			);
+
+			std::vector<std::any> args = {inst, this};
+			if (parse->EventNPC(EVENT_LOOT_ZONE, controller, c, export_string, 0, &args) != 0) {
+				prevent_loot = true;
+			}
+		}
+	}
+
+	if (parse->PlayerHasQuestSub(EVENT_LOOT)) {
+		const auto &export_string = fmt::format(
+			"{} {} {} {}",
+			inst->GetItem()->ID,
+			inst->GetCharges(),
+			EntityList::RemoveNumbers(corpse_name),
+			GetID()
+		);
+
+		std::vector<std::any> args = {inst, this};
+		if (parse->EventPlayer(EVENT_LOOT, c, export_string, 0, &args) != 0) {
+			prevent_loot = true;
+		}
+	}
+
+	if (parse->ZoneHasQuestSub(EVENT_LOOT_ZONE)) {
+		const auto &export_string = fmt::format(
+			"{} {} {} {}",
+			inst->GetItem()->ID,
+			inst->GetCharges(),
+			EntityList::RemoveNumbers(corpse_name),
+			GetID()
+		);
+
+		std::vector<std::any> args = {inst, this, c};
+		if (parse->EventZone(EVENT_LOOT_ZONE, zone, export_string, 0, &args) != 0) {
+			prevent_loot = true;
+		}
+	}
+
+	if (!IsPlayerCorpse()) {
+		auto dz = zone->GetDynamicZone();
+		if (dz && !dz->CanClientLootCorpse(c, GetNPCTypeID(), GetID())) {
+			prevent_loot = true;
+			c->MessageString(Chat::Loot, LOOT_NOT_ALLOWED, inst->GetItem()->Name);
+		}
+	}
+
+	if (parse->ItemHasQuestSub(inst, EVENT_LOOT)) {
+		const auto &export_string = fmt::format(
+			"{} {} {} {}",
+			inst->GetItem()->ID,
+			inst->GetCharges(),
+			EntityList::RemoveNumbers(corpse_name),
+			GetID()
+		);
+
+		std::vector<std::any> args = {inst, this};
+		if (parse->EventItem(EVENT_LOOT, c, inst, this, export_string, 0, &args) != 0) {
+			prevent_loot = true;
+		}
+	}
+
+	if (prevent_loot) {
+		safe_delete(inst);
+		return false;
+	}
+
+	if (PlayerEventLogs::Instance()->IsEventEnabled(PlayerEvent::LOOT_ITEM) && !IsPlayerCorpse()) {
+		auto e = PlayerEvent::LootItemEvent{
+			.item_id      = inst->GetItem()->ID,
+			.item_name    = inst->GetItem()->Name,
+			.charges      = inst->GetCharges(),
+			.augment_1_id = inst->GetAugmentItemID(0),
+			.augment_2_id = inst->GetAugmentItemID(1),
+			.augment_3_id = inst->GetAugmentItemID(2),
+			.augment_4_id = inst->GetAugmentItemID(3),
+			.augment_5_id = inst->GetAugmentItemID(4),
+			.augment_6_id = inst->GetAugmentItemID(5),
+			.npc_id       = GetNPCTypeID(),
+			.corpse_name  = EntityList::RemoveNumbers(corpse_name)
+		};
+
+		RecordPlayerEventLogWithClient(c, PlayerEvent::LOOT_ITEM, e);
+	}
+
+	if (!IsPlayerCorpse()) {
+		c->CheckItemDiscoverability(inst->GetID());
+	}
+
+	if (zone->adv_data) {
+		auto *ad = (ServerZoneAdventureDataReply_Struct *) zone->adv_data;
+		if (ad->type == Adventure_Collect && !IsPlayerCorpse()) {
+			if (ad->data_id == inst->GetItem()->ID) {
+				zone->DoAdventureCountIncrease();
+			}
+		}
+	}
+
+	// count for the task update, captured before AutoPutLootInInventory can mutate the instance
+	const int task_count = inst->IsStackable() ? inst->GetCharges() : 1;
+
 	if (adv_auto_sold) {
 		const uint32 price = item->Price;
 		c->AddMoneyToPP(price % 10, (price / 10) % 10, (price / 100) % 10, price / 1000, true);
@@ -1008,6 +1147,12 @@ bool Corpse::AdvLootItem(Client *c, uint32 adv_uid)
 	}
 	else if (!c->AutoPutLootInInventory(*inst, true, true, nullptr)) {
 		c->PutLootInInventory(EQ::invslot::slotCursor, *inst, nullptr);
+	}
+
+	// Loot-type task activities count the loot event, so they advance even when the item was
+	// converted to coin by auto-sell
+	if (RuleB(TaskSystem, EnableTaskSystem) && IsNPCCorpse()) {
+		c->UpdateTasksOnLoot(this, item->ID, task_count);
 	}
 
 	if (m_corpse_db_id) {
@@ -1025,6 +1170,51 @@ bool Corpse::AdvLootItem(Client *c, uint32 adv_uid)
 
 	safe_delete(inst);
 	return true;
+}
+
+// akk-stack Advanced Looting: would delivering this drop (base item or any augment) to the player hit
+// a lore conflict? AdvLootItem refuses on its own, but returns the same false as a quest veto -- the
+// Give path pre-checks with this so it can tell the SENDER specifically why nothing happened. Note it
+// ignores the receiver's always-sell pref (an auto-sold drop is lore-exempt); such a give is refused
+// anyway, and the receiver can still Loot it themselves.
+bool Corpse::AdvLoreBlocked(Client *c, uint32 adv_uid)
+{
+	if (!c) {
+		return false;
+	}
+
+	const LootItem *item_data = nullptr;
+	for (const auto &li : m_item_list) {
+		if (li && li->adv_uid == adv_uid) {
+			item_data = li;
+			break;
+		}
+	}
+	if (!item_data) {
+		return false;
+	}
+
+	const EQ::ItemData *item = database.GetItem(item_data->item_id);
+	if (!item) {
+		return false;
+	}
+
+	if (c->CheckLoreConflict(item)) {
+		return true;
+	}
+
+	const uint32 augs[] = {
+		item_data->aug_1, item_data->aug_2, item_data->aug_3,
+		item_data->aug_4, item_data->aug_5, item_data->aug_6
+	};
+	for (const uint32 aug_id : augs) {
+		const EQ::ItemData *aug = aug_id ? database.GetItem(aug_id) : nullptr;
+		if (aug && c->CheckLoreConflict(aug)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 // akk-stack Advanced Looting: one-time "Sell" of a corpse drop -- remove it and pay the player its

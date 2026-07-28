@@ -14291,6 +14291,16 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 
 			const uint32        adv_iid  = corpse->AdvItemId(adv_uid);
 			const EQ::ItemData *adv_item = adv_iid ? database.GetItem(adv_iid) : nullptr;
+			if (corpse->AdvLoreBlocked(adv_tc, adv_uid)) {
+				SendPopupToClient(
+					"Advanced Loot",
+					fmt::format(
+						"{} already has {} (Lore Item).<br><br>It cannot be given to them and stays on the corpse.",
+						adv_tc->GetName(), adv_item ? adv_item->Name : "that item"
+					).c_str()
+				);
+				return;
+			}
 			if (corpse->AdvLootItem(adv_tc, adv_uid)) {
 				adv_loot_rolls.Cancel(corpse_id, adv_uid); // the item is gone; kill any roll on it
 				Message(
@@ -14298,6 +14308,13 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 					adv_item ? adv_item->Name : "that item", adv_tc->GetName()
 				);
 				AdvLootBroadcastRemoved(this, corpse_id, adv_uid, adv_tc);
+			}
+			else {
+				// quest veto or DZ lockout on the receiver (they were messaged) -- the drop stays put
+				Message(
+					Chat::Yellow, "[AdvLoot] %s could not take %s -- it stays on the corpse.",
+					adv_tc->GetName(), adv_item ? adv_item->Name : "that item"
+				);
 			}
 		}
 		else {             // NEVER -- persist the item's id so future pushes/aggregation skip it
