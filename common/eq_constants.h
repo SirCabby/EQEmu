@@ -193,6 +193,19 @@ namespace Chat {
 	const uint16 ItemSpeech       = 338;
 	const uint16 StrikeThrough    = 339;
 	const uint16 Stun             = 340;
+
+	/**
+	 * akk-stack custom channels
+	 *
+	 * These claim user-color slots the stock client ships as spares, so a custom feature's chat
+	 * gets its own recolorable line without patching the client binary. RoF2 lists every user
+	 * color in Options -> Colors (its table covers 256-354) and stores them in eqclient.ini as
+	 * [TextColors] User_<n>_Red/Green/Blue where n = type - 255, so /usercolor <n> <r> <g> <b>
+	 * works too. The client pack's eqstr_us.txt override renames the matching list entry from
+	 * "Unused at this time" to something meaningful; on a stock client the slot still works, it
+	 * is just labeled as unused.
+	 */
+	const uint16 AdvLootWin = Unused1; // 272 -- Advanced Looting roll wins; Colors list entry 17
 };
 
 // generation SQL:

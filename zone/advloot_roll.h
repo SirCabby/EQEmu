@@ -17,6 +17,7 @@
 */
 #pragma once
 
+#include "common/eq_constants.h" // Chat:: channels (Announce's default chat type)
 #include "common/timer.h"
 #include "common/types.h"
 
@@ -143,7 +144,9 @@ private:
 	void     SendTally(const Session &s);                    // push the row's tally to every eligible looter
 	void     SendTallyTo(const Session &s, Client *c);       // ...to one of them (ALW5; voted flag is per-player)
 	void     SendRowRemoved(const Session &s);
-	void     Announce(const Session &s, const std::string &message);
+	// Chat line to every eligible looter. chat_type defaults to the plain white the rest of the roll
+	// commentary uses; the win line passes Chat::AdvLootWin so players can color wins on their own.
+	void     Announce(const Session &s, const std::string &message, uint16 chat_type = Chat::White);
 
 	std::list<Session> m_sessions; // list, not vector: Find() hands out pointers that must stay valid
 	Timer              m_refresh{1000};

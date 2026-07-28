@@ -95,12 +95,12 @@ void AdvLootRollManager::Erase(const Session *s)
 }
 
 // Chat line to everyone the roll concerns (offline / zoned-out members are simply skipped).
-void AdvLootRollManager::Announce(const Session &s, const std::string &message)
+void AdvLootRollManager::Announce(const Session &s, const std::string &message, uint16 chat_type)
 {
 	for (const uint32 character_id : s.eligible) {
 		Client *c = entity_list.GetClientByCharID(character_id);
 		if (c) {
-			c->Message(Chat::White, message.c_str());
+			c->Message(chat_type, message.c_str());
 		}
 	}
 }
@@ -418,10 +418,13 @@ void AdvLootRollManager::Resolve(Session &s)
 		return;
 	}
 
+	// The one line players actually watch for, so it gets its own recolorable channel (the rest of the
+	// roll commentary stays plain white). See Chat::AdvLootWin in common/eq_constants.h.
 	Announce(
 		s,
 		fmt::format("[AdvLoot] {} wins {} with a {} roll of {}.",
-					winner->GetCleanName(), adv_item_link(s.item_id, s.item_name), best_vote == VoteNeed ? "Need" : "Greed", best)
+					winner->GetCleanName(), adv_item_link(s.item_id, s.item_name), best_vote == VoteNeed ? "Need" : "Greed", best),
+		Chat::AdvLootWin
 	);
 	SendRowRemoved(s); // the item is off the corpse now -- clear the row everywhere
 }
