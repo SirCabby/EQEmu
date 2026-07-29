@@ -13921,16 +13921,45 @@ static void AdvLootBroadcastRemoved(Client *actor, uint16 corpse_id, uint32 adv_
 	}
 }
 
-// akk-stack Advanced Looting: push a player their saved per-item preferences for the Manage window --
-// "ALW6|<item_id>,<icon>,<mode>,<sell>,<value>,<name>|..." over the OP_Marquee carrier. mode is the roll
-// action (0 never / 1 always-need / 2 always-greed / 3 none), sell is the always-sell flag, value is the
-// merchant price in copper. Every saved row is listed (a sell-only row has mode 3). Capped at 20.
-// Rows go out sorted by item NAME (the client renders them in receive order), so the name sort has to
-// happen here -- the name lives in the item cache, not in `character_loot_never`, so the DB can't do it.
-static void AdvSendPrefList(Client *c)
+// Largest page the Manage window may ask for -- matches MANAGE_ROWS in lootwnd.cpp, which is how many
+// widget rows the XML has. That is deliberately far more than the window is tall: its Screen scrolls its
+// children, so the window height limits how much is on screen at once, not how much a page can hold.
+static const uint32 ADV_PREF_PAGE_MAX = 100;
+
+// A page is split across as many OP_Marquee messages as it takes to keep each one near this size, so the
+// page size is governed by screen space alone and never by what fits in one packet. (The client reads the
+// text straight out of the received packet -- eqgame 0x4CB84C hands DisplayText a bare `struct + 0x18`
+// pointer, no fixed copy buffer -- so this is about staying in the size range the carrier already
+// carries every day, not about a hard limit.)
+static const size_t ADV_PREF_CHUNK_BYTES = 800;
+
+// akk-stack Advanced Looting: push a player ONE PAGE of their saved per-item preferences for the Manage
+// window -- "ALW6|<total>,<offset>|<item_id>,<icon>,<mode>,<sell>,<value>,<name>|..." over the OP_Marquee
+// carrier. mode is the roll action (0 never / 1 always-need / 2 always-greed / 3 none), sell is the
+// always-sell flag, value is the merchant price in copper. Every saved row is listable (a sell-only row
+// has mode 3).
+//
+// The saved list is per-character and UNBOUNDED -- it grows one row per item the player ever marks, so it
+// can reach thousands -- and therefore is never sent whole. The leading header record carries `total` (how
+// many rows match `filter`) and `offset` (index of this page's first row), which is everything the client
+// needs to drive its pager without knowing the list size up front.
+//
+// Sorting and filtering both happen HERE because the item NAME lives in the shared item cache, not in
+// `character_loot_never` -- the DB can neither ORDER BY nor LIKE against it, so it also can't LIMIT/OFFSET
+// a name-ordered page. The full row set is read, resolved, filtered, sorted, and then sliced in memory.
+static void AdvSendPrefList(Client *c, uint32 offset, uint32 limit, const std::string &filter)
 {
 	if (!c) {
 		return;
+	}
+
+	if (!limit || limit > ADV_PREF_PAGE_MAX) {
+		limit = ADV_PREF_PAGE_MAX;
+	}
+
+	std::string filter_lc = filter;
+	for (auto &ch : filter_lc) {
+		ch = (char) std::tolower((unsigned char) ch);
 	}
 
 	auto rows = database.QueryDatabase(fmt::format(
@@ -13945,7 +13974,7 @@ static void AdvSendPrefList(Client *c)
 		uint8       sell;
 		uint32      price;
 		std::string name;
-		std::string sort_key; // lowercased name, so the sort is case-insensitive
+		std::string sort_key; // lowercased name, so the sort (and the filter match) is case-insensitive
 	};
 
 	std::vector<AdvPrefRow> prefs;
@@ -13967,6 +13996,10 @@ static void AdvSendPrefList(Client *c)
 		for (auto &ch : p.sort_key) {
 			ch = (char) std::tolower((unsigned char) ch);
 		}
+		// the filter searches the WHOLE list, not just the page the client happens to be showing
+		if (!filter_lc.empty() && p.sort_key.find(filter_lc) == std::string::npos) {
+			continue;
+		}
 		prefs.emplace_back(std::move(p));
 	}
 
@@ -13980,27 +14013,51 @@ static void AdvSendPrefList(Client *c)
 		}
 	);
 
-	std::string msg   = "ALW6"; // leading marker with no record = "your list is empty, clear it"
-	int         count = 0;
-	for (const auto &p : prefs) {
-		msg += "|";
-		msg += std::to_string(p.item_id);
-		msg += ",";
-		msg += std::to_string((unsigned) p.icon);
-		msg += ",";
-		msg += std::to_string((unsigned) p.mode);
-		msg += ",";
-		msg += std::to_string((unsigned) p.sell);
-		msg += ",";
-		msg += std::to_string((unsigned) p.price);
-		msg += ",";
-		msg += p.name;
-		if (++count >= 20) {
-			break;
-		}
+	// Clamp the requested page onto the (possibly just-shrunk) list so removing the last row of the last
+	// page walks back a page instead of showing an empty window.
+	const uint32 total = (uint32) prefs.size();
+	if (offset >= total) {
+		offset = total ? ((total - 1) / limit) * limit : 0;
 	}
 
-	c->SendMarqueeMessage(0, msg, 1000);
+	// Emit the page as one or more chunks. Header per chunk: total, offset, seq, more -- `seq` 0 tells the
+	// client to start a fresh page and `more` says whether to keep accumulating. An empty page still sends
+	// one header-only chunk, which is what clears a list down to nothing.
+	const uint32 last = std::min(total, offset + limit);
+	uint32       i    = offset;
+	uint32       seq  = 0;
+
+	do {
+		std::string body;
+		while (i < last) {
+			const AdvPrefRow &p = prefs[i];
+			std::string rec = "|";
+			rec += std::to_string(p.item_id);
+			rec += ",";
+			rec += std::to_string((unsigned) p.icon);
+			rec += ",";
+			rec += std::to_string((unsigned) p.mode);
+			rec += ",";
+			rec += std::to_string((unsigned) p.sell);
+			rec += ",";
+			rec += std::to_string((unsigned) p.price);
+			rec += ",";
+			rec += p.name;
+			// always take at least one record, so a single oversized row can never stall the loop
+			if (!body.empty() && body.size() + rec.size() > ADV_PREF_CHUNK_BYTES) {
+				break;
+			}
+			body += rec;
+			++i;
+		}
+
+		c->SendMarqueeMessage(
+			0,
+			fmt::format("ALW6|{},{},{},{}", total, offset, seq, i < last ? 1 : 0) + body,
+			1000
+		);
+		++seq;
+	} while (i < last);
 }
 
 void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
@@ -14098,9 +14155,28 @@ void Client::Handle_OP_AdvLootAction(const EQApplicationPacket *app)
 		return;
 	}
 
-	// REQUEST_PREF_LIST (21) -- the Manage window is opening; send the saved-preferences list (ALW6).
+	// REQUEST_PREF_LIST (21) -- the Manage window wants a page of the saved-preferences list (ALW6).
+	// Body: [u8 21][u16 offset][u8 limit][char filter[] NUL-terminated]. The saved list is unbounded, so
+	// the client pages through it and the server does the name filtering; everything past the action byte
+	// is optional so a bare 1-byte request still means "first page, no filter".
 	if (action == 21) {
-		AdvSendPrefList(this);
+		uint32 pref_offset = 0;
+		uint32 pref_limit  = 0; // 0 = server default (ADV_PREF_PAGE_MAX)
+		if (app->size >= 3) {
+			pref_offset = (uint32) (b[1] | (b[2] << 8));
+		}
+		if (app->size >= 4) {
+			pref_limit = b[3];
+		}
+
+		std::string pref_filter;
+		if (app->size > 4) {
+			const char *f   = (const char *) &b[4];
+			const size_t max = app->size - 4;
+			pref_filter.assign(f, strnlen(f, max)); // tolerate a missing terminator
+		}
+
+		AdvSendPrefList(this, pref_offset, pref_limit, pref_filter);
 		return;
 	}
 
