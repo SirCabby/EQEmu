@@ -162,13 +162,14 @@ void Client::Handle_OP_ZoneChange(const EQApplicationPacket *app) {
 		}
 	}
 
-	// akk-stack Private Zone Instancing: on a client-initiated zone entry (zone line) with no explicit
-	// instance, route an associated player into their private instance of the target zone. Placed before
-	// the instance-verification block so the injected instance flows through VerifyInstanceAlive /
-	// VerifyZoneInstance / safe-point loading and out to DoZoneSuccess. (ZonePC covers server-initiated
-	// moves; this covers client-initiated zone lines.)
-	if (target_instance_id == 0) {
-		uint16 pi_id = PrivateInstance::Resolve(this, target_zone_id, PrivateInstance::BaseVersion(target_zone_id));
+	// akk-stack Private Zone Instancing: on a client-initiated zone entry (zone line) targeting the
+	// zone's PUBLIC context -- instance 0 OR its registered global static instance (classic clones like
+	// nektulos_classic are always served through one, so their target is never 0) -- route an associated
+	// player into their private instance instead. Placed before the instance-verification block so the
+	// injected instance flows through VerifyInstanceAlive / VerifyZoneInstance / safe-point loading and
+	// out to DoZoneSuccess. (ZonePC covers server-initiated moves; this covers client zone lines.)
+	if (target_instance_id == 0 || WorldContentService::Instance()->IsInPublicStaticInstance(target_instance_id)) {
+		uint16 pi_id = PrivateInstance::Resolve(this, target_zone_id, PrivateInstance::PublicVersion(target_zone_id, target_instance_id));
 		if (pi_id) {
 			target_instance_id = pi_id;
 			LogZoning(
@@ -813,11 +814,13 @@ void Client::ZonePC(uint32 zoneID, uint32 instance_id, float x, float y, float z
 		}
 	}
 
-	// akk-stack Private Zone Instancing: when no explicit instance was requested (instance_id == 0),
-	// route an associated player into their private instance of this zone. Runs after the static/global
-	// version middleware and BEFORE zone sharding, so a private instance takes precedence.
-	if (instance_id == 0) {
-		uint16 pi_id = PrivateInstance::Resolve(this, zoneID, PrivateInstance::BaseVersion(zoneID));
+	// akk-stack Private Zone Instancing: when the move targets the zone's PUBLIC context -- no explicit
+	// instance, or the global static instance the version middleware just resolved (classic clones are
+	// always served through one) -- route an associated player into their private instance instead.
+	// Runs after the static/global version middleware and BEFORE zone sharding, so a private instance
+	// takes precedence.
+	if (instance_id == 0 || WorldContentService::Instance()->IsInPublicStaticInstance(instance_id)) {
+		uint16 pi_id = PrivateInstance::Resolve(this, zoneID, PrivateInstance::PublicVersion(zoneID, instance_id));
 		if (pi_id) {
 			instance_id = pi_id;
 			LogZoning(

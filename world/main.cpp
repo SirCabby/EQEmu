@@ -95,12 +95,14 @@ static void SweepPrivateInstances()
 	const uint32 now   = static_cast<uint32>(time(nullptr));
 	const uint32 grace = static_cast<uint32>(RuleI(PrivateInstance, OfflineCleanupSeconds));
 
-	auto rows = database.QueryDatabase("SELECT id FROM instance_list WHERE notes LIKE 'akk_private:%'");
+	auto rows = database.QueryDatabase("SELECT id, zone, version FROM instance_list WHERE notes LIKE 'akk_private:%'");
 	if (!rows.Success()) {
 		return;
 	}
 	for (auto row = rows.begin(); row != rows.end(); ++row) {
-		const uint16 id = static_cast<uint16>(Strings::ToUnsignedInt(row[0]));
+		const uint16 id      = static_cast<uint16>(Strings::ToUnsignedInt(row[0]));
+		const uint32 zone_id = Strings::ToUnsignedInt(row[1]);
+		const uint32 version = Strings::ToUnsignedInt(row[2]);
 		if (!id) {
 			continue;
 		}
@@ -138,7 +140,14 @@ static void SweepPrivateInstances()
 		if (still.Success() && still.RowCount() > 0) {
 			continue; // still associated -> keep the record (re-bootable on re-entry)
 		}
-		database.QueryDatabase(fmt::format("UPDATE character_corpses SET instance_id = 0 WHERE instance_id = {}", id));
+		// Corpses fall to the zone's public context: the registered global static instance when the
+		// zone is served through one (classic clones like nektulos_classic), else instance 0.
+		database.QueryDatabase(fmt::format(
+			"UPDATE character_corpses SET instance_id = COALESCE("
+			"(SELECT id FROM instance_list WHERE is_global = 1 AND never_expires = 1 "
+			"AND zone = {} AND version = {} LIMIT 1), 0) WHERE instance_id = {}",
+			zone_id, version, id
+		));
 		database.DeleteInstance(id);
 		database.QueryDatabase(fmt::format("DELETE FROM instance_list WHERE id = {}", id));
 		LogInfo("[PrivateInstance] world sweep reaped orphaned instance [{}] (down + unassociated)", id);

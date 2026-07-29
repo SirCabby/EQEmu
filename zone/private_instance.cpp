@@ -17,6 +17,7 @@
 #include "groups.h"
 #include "raids.h"
 #include "questmgr.h"
+#include "common/content/world_content_service.h"
 #include "common/rulesys.h"
 #include "common/servertalk.h"
 #include "common/strings.h"
@@ -94,6 +95,47 @@ int16_t BaseVersion(uint32_t zone_id)
 {
 	auto z = GetZoneVersionWithFallback(zone_id, 0);
 	return z ? static_cast<int16_t>(z->version) : 0;
+}
+
+int16_t PublicVersion(uint32_t zone_id, uint16_t instance_id)
+{
+	if (instance_id) {
+		auto i = InstanceListRepository::FindOne(database, instance_id);
+		if (i.id && i.zone == zone_id) {
+			return static_cast<int16_t>(i.version);
+		}
+	}
+	return BaseVersion(zone_id);
+}
+
+uint16_t PublicInstanceID(uint32_t zone_id, int16_t version)
+{
+	auto r = database.QueryDatabase(fmt::format(
+		"SELECT id FROM instance_list WHERE is_global = 1 AND never_expires = 1 "
+		"AND zone = {} AND version = {} LIMIT 1",
+		zone_id,
+		version
+	));
+	if (!r.Success() || !r.RowCount()) {
+		return 0;
+	}
+	return static_cast<uint16_t>(Strings::ToUnsignedInt(r.begin()[0]));
+}
+
+// True while the client's CURRENT zone process is the public context of (zone_id, version):
+// the plain zone (instance 0), or the registered global static instance serving that version
+// (classic clones like nektulos_classic live in a global static, never in instance 0).
+static bool StandingInPublicContext(uint32 zone_id, int16 version)
+{
+	if (!zone || zone->GetZoneID() != zone_id) {
+		return false;
+	}
+	const uint16 iid = zone->GetInstanceID();
+	if (iid == 0) {
+		return true;
+	}
+	return WorldContentService::Instance()->IsInPublicStaticInstance(iid) &&
+	       static_cast<int16>(zone->GetInstanceVersion()) == version;
 }
 
 uint16_t Resolve(Client *c, uint32_t zone_id, int16_t version)
@@ -355,11 +397,23 @@ bool ReconcileEmptyInProcess()
 	// No associations and the caller guarantees the zone is empty of PCs. Relocate PC corpses to the
 	// base/public zone (visible, same coords -- NOT buried) from THIS process so the corpse destructors
 	// won't clobber the instance_id back (see the corpse re-save caveat), THEN destroy the record.
+	// MovePlayerCorpseToNonInstance targets instance 0; when the zone's public context is a global
+	// static instance (classic clones), retarget the row there or the corpse would never be seen.
+	const uint16 pub = PublicInstanceID(zone->GetZoneID(), static_cast<int16>(zone->GetInstanceVersion()));
 	std::list<Corpse *> corpses;
 	entity_list.GetCorpseList(corpses);
 	int moved = 0;
 	for (auto *corpse : corpses) {
-		if (corpse && corpse->IsPlayerCorpse() && corpse->MovePlayerCorpseToNonInstance()) {
+		if (!corpse || !corpse->IsPlayerCorpse()) {
+			continue;
+		}
+		const uint32 corpse_db_id = corpse->GetCorpseDBID();
+		if (corpse->MovePlayerCorpseToNonInstance()) {
+			if (pub && corpse_db_id) {
+				database.QueryDatabase(fmt::format(
+					"UPDATE character_corpses SET instance_id = {} WHERE id = {}", pub, corpse_db_id
+				));
+			}
 			++moved;
 		}
 	}
@@ -423,8 +477,8 @@ void DoPort(Client *c, uint16_t instance_id)
 	if (!il.id) {
 		return;
 	}
-	// Only port a player standing in the base PUBLIC zone of this instance.
-	if (zone->GetZoneID() != il.zone || zone->GetInstanceID() != 0) {
+	// Only port a player standing in the public context of this instance's base zone+version.
+	if (!StandingInPublicContext(il.zone, static_cast<int16>(il.version))) {
 		return; // not at the doorstep -> they run there and the routing resolver delivers them
 	}
 	if (IsRestedForInstancing(c)) {
@@ -445,8 +499,8 @@ void TryDeferredPort(Client *c)
 		return;
 	}
 	auto il = InstanceListRepository::FindOne(database, id);
-	// cancel if the instance died, or we are no longer standing in its base public zone
-	if (!il.id || zone->GetZoneID() != il.zone || zone->GetInstanceID() != 0) {
+	// cancel if the instance died, or we are no longer standing in its base zone's public context
+	if (!il.id || !StandingInPublicContext(il.zone, static_cast<int16>(il.version))) {
 		c->SetPendingPrivatePort(0);
 		return;
 	}

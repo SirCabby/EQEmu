@@ -99,6 +99,16 @@ namespace PrivateInstance {
 	// the owner was standing in when they created it.
 	int16_t BaseVersion(uint32_t zone_id);
 
+	// The version a public context serves: instance 0 -> BaseVersion(zone_id); a registered global
+	// static instance (classic clones / versioned revamps) -> that instance's own version. The
+	// routing hooks pass the STATIC's version to Resolve so a private base-version instance never
+	// hijacks a trip into a DIFFERENT public version (e.g. a hard-mode book target).
+	int16_t PublicVersion(uint32_t zone_id, uint16_t instance_id);
+
+	// The public-context instance id of (zone_id, version): the registered global static instance
+	// when the zone is served through one (classic clones like nektulos_classic), else 0.
+	uint16_t PublicInstanceID(uint32_t zone_id, int16_t version);
+
 	// Create a private instance of zone_id (at its base version) owned by the character and
 	// associate them. Returns the new instance id, or 0 on failure. Does NOT move the player.
 	// NOTE (M0): gates (rested / leadership / lockout / instanceable) are added in M1.
