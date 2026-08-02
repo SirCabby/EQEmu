@@ -4972,14 +4972,20 @@ void Mob::CommonDamage(Mob* attacker, int64 &damage, const uint16 spell_id, cons
 		// So we can see our dot dmg like live shows it.
 		if (IsValidSpell(spell_id) && damage > 0 && attacker && attacker != this) {
 			//might filter on (attack_skill>200 && attack_skill<250), but I dont think we need it
+			// everyone but the caster buckets the tick by who owns it: another player (or their
+			// pet) vs an NPC. The caster's own line gets its own type below.
+			Mob *attack_owner = attacker->GetOwner();
+			uint16 dot_type = (attacker->IsClient() || (attack_owner && attack_owner->IsClient()))
+				? Chat::DotDamageOthers : Chat::DotDamageNpcs;
+
 			if (!attacker->IsCorpse() && attacker->IsClient()) {
-				attacker->FilteredMessageString(attacker, Chat::DotDamage,
+				attacker->FilteredMessageString(attacker, Chat::DotDamageYours,
 					FilterDOT, YOUR_HIT_DOT, GetCleanName(), itoa(damage),
 					spells[spell_id].name);
 			}
 
 			if (IsClient()) {
-				FilteredMessageString(this, Chat::DotDamage, FilterDOT,
+				FilteredMessageString(this, dot_type, FilterDOT,
 					YOU_TAKE_DOT, itoa(damage), attacker->GetCleanName(),
 					spells[spell_id].name);
 			}
@@ -4989,7 +4995,7 @@ void Mob::CommonDamage(Mob* attacker, int64 &damage, const uint16 spell_id, cons
 				this, /* Sender */
 				true, /* Skip Sender */
 				RuleI(Range, SpellMessages),
-				Chat::DotDamage, /* Type: 325 */
+				dot_type, /* Type: 342 player-owned / 346 NPC-owned */
 				FilterDOT, /* FilterType: 19 */
 				OTHER_HIT_DOT,  /* MessageFormat: %1 has taken %2 damage from %3 by %4. */
 				attacker,		/* sent above */

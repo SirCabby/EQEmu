@@ -206,6 +206,19 @@ namespace Chat {
 	 * is just labeled as unused.
 	 */
 	const uint16 AdvLootWin = Unused1; // 272 -- Advanced Looting roll wins; Colors list entry 17
+
+	/**
+	 * DoT damage, split three ways by who owns the tick. All three still send with FilterDOT,
+	 * so the stock Filters -> "Damage Over Time" checkbox keeps gating every DoT line; the split
+	 * is purely for coloring. Chat::DotDamage (325) is retired from the tick path -- its Colors
+	 * row is the one entry the stock client hides, so it was never recolorable in the UI anyway.
+	 * 355+ are BRAND-NEW types past the stock client's 256-354 user-color range: the client-pack
+	 * chatcolors.asi extends the color table so these get their own Options -> Colors rows and
+	 * persistence. A client without the .asi shows them in the default text color.
+	 */
+	const uint16 DotDamageYours  = 355; // your DoTs ticking
+	const uint16 DotDamageOthers = 356; // other players' (and their pets') DoTs
+	const uint16 DotDamageNpcs   = 357; // NPC DoTs
 };
 
 // generation SQL:
