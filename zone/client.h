@@ -1725,6 +1725,8 @@ public:
 	bool MoveItemToInventory(EQ::ItemInstance *BInst, bool UpdateClient = false);
 	void HandleRespawnFromHover(uint32 Option);
 	void ReviveForRespawn();
+	void ExitHoverForRezz(float x, float y, float z);
+	void ResendRespawnWindow();
 	bool IsHoveringForRespawn() { return RespawnFromHoverTimer.Enabled(); }
 	std::list<RespawnOption> respawn_options;
 	void AddRespawnOption(std::string option_name, uint32 zoneid, uint16 instance_id, float x, float y, float z, float h = 0, bool initial_selection = false, int8 position = -1);

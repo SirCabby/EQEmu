@@ -1052,6 +1052,36 @@ void Client::OPRezzAnswer(uint32 Action, uint32 SpellID, uint16 ZoneID, uint16 I
 
 	if (Action == 1)
 	{
+		// AKK-STACK FIX: a rez accepted while the player is still hovering over their corpse has to
+		// end the hover state FIRST. Stock only did that for the respawn window's "Resurrect"
+		// option and applied the rez straight onto a hovering client for every other route -- and
+		// the RoF2 client also offers its own rez confirmation box while the death chooser is up.
+		// Accepting from that box left the player permanently dead: Client::Process() re-stamps
+		// SetHP(-100) every tick while `dead` is set, SpellOnTarget() refuses to land rez sickness
+		// on a hovering client, ClearHover() never ran (so the entity id stayed 0 -- invisible and
+		// untargetable), and the rez was consumed, all while the client had already dismissed the
+		// respawn window. The only way out was the hover timer eventually dumping them at bind.
+		const bool from_hover = IsHoveringForRespawn();
+		const bool same_zone  = (ZoneID == zone->GetZoneID() && InstanceID == zone->GetInstanceID());
+
+		if (from_hover) {
+			if (GetHP() <= 0) {
+				// Provisional, so the corpse's -100 does not go out in the re-spawn packet; the
+				// rez effects below set the real value.
+				SetHP(GetMaxHP() / 5);
+			}
+
+			if (same_zone) {
+				ExitHoverForRezz(x, y, z);
+			}
+			else {
+				// The corpse is in another zone, so the client really does zone: just leave the
+				// hover state behind and let the MovePC() below deliver us there alive.
+				RespawnFromHoverTimer.Disable();
+				ClearHover();
+			}
+		}
+
 		// Mark the corpse as rezzed in the database, just in case the corpse has buried, or the zone the
 		// corpse is in has shutdown since the rez spell was cast.
 		database.MarkCorpseAsResurrected(PendingRezzDBID);
@@ -1130,6 +1160,24 @@ void Client::OPRezzAnswer(uint32 Action, uint32 SpellID, uint16 ZoneID, uint16 I
 		//but that could be abusable, so lets go through proper channels
 		MovePC(ZoneID, InstanceID, x, y, z, GetHeading(), 0, ZoneSolicited);
 		entity_list.RefreshClientXTargets(this);
+
+		if (from_hover) {
+			// AKK-STACK FIX: FORCED self-updates, and only now that the rez has set our real
+			// values. ClearHover() gave us a new entity id, so everything the client was told
+			// while we were hovering carried spawn id 0 and was discarded -- but it was still
+			// recorded in last_*, so an unforced update here dedupes to nothing and the player
+			// sits at 0% hp/mana/endurance until the next real change. Same fix as the
+			// "Return to Bind" path in HandleRespawnFromHover().
+			SendHPUpdate(true);
+			last_reported_mana              = -1;
+			last_reported_endurance         = -1;
+			last_reported_mana_percent      = -1;
+			last_reported_endurance_percent = -1;
+			CheckManaEndUpdate();
+
+			LogError("RESPAWNDBG hover rez: same_zone [{}] cur_hp [{}] max_hp [{}] dead [{}] id [{}]",
+				same_zone ? 1 : 0, GetHP(), GetMaxHP(), dead ? 1 : 0, GetID());
+		}
 	}
 	PendingRezzXP = -1;
 	PendingRezzSpellID = 0;
@@ -2169,9 +2217,77 @@ void Client::ReviveForRespawn()
 	RestoreEndurance();
 }
 
-void Client::HandleRespawnFromHover(uint32 Option)
+// AKK-STACK: end the death-hover state for a resurrection landing at (x, y, z) in THIS zone.
+// Every way of accepting a rez while hovering funnels through here (see OPRezzAnswer), so the
+// two entry points -- the respawn window's "Resurrect" option and the client's own rez
+// confirmation box -- can never drift apart again.
+//
+// The client never zones for a same-zone respawn: it acts on OP_ZonePlayerToBind locally and
+// never sends OP_ZoneChange back (verified across every live zone log -- zero same-zone zone
+// requests), so the server has to stand the player back up itself.
+void Client::ExitHoverForRezz(float x, float y, float z)
 {
 	RespawnFromHoverTimer.Disable();
+
+	m_Position.x = x;
+	m_Position.y = y;
+	m_Position.z = z;
+
+	// Tells the client it has respawned in place at the corpse. bind_zone_id is this zone (not
+	// the 0 "old hack") because that is what the SoF-and-later hover path expects.
+	auto outapp = new EQApplicationPacket(OP_ZonePlayerToBind, sizeof(ZonePlayerToBind_Struct) + 10);
+	ZonePlayerToBind_Struct* gmg = (ZonePlayerToBind_Struct*) outapp->pBuffer;
+
+	gmg->bind_zone_id     = zone->GetZoneID();
+	gmg->bind_instance_id = zone->GetInstanceID();
+	gmg->x                = GetX();
+	gmg->y                = GetY();
+	gmg->z                = GetZ();
+	gmg->heading          = GetHeading();
+	strcpy(gmg->zone_name, "Resurrect");
+
+	FastQueuePacket(&outapp);
+
+	// Clears `dead`, gives us a fresh entity id (ours went to the corpse in Client::Death) and
+	// re-spawns us for everyone else in the zone.
+	ClearHover();
+
+	// This rez consumes the window's trailing "Resurrect" entry.
+	if (!respawn_options.empty()) {
+		respawn_options.pop_back();
+	}
+}
+
+// AKK-STACK: put the death chooser back on the player's screen. The client closes its respawn
+// window the moment it sends a selection, so any path that then refuses that selection has to
+// re-send the window or the player is left dead with no way to respawn. SendRespawnBinds()
+// re-appends the trailing "Resurrect" entry, so drop the current one first to keep the option
+// list from growing.
+void Client::ResendRespawnWindow()
+{
+	if (!respawn_options.empty()) {
+		respawn_options.pop_back();
+	}
+
+	SendRespawnBinds();
+}
+
+void Client::HandleRespawnFromHover(uint32 Option)
+{
+	// AKK-STACK FIX: ignore a stale or duplicate selection. We have already left the hover state
+	// (a rez accepted from the confirmation box gets here first, and the client sends one packet
+	// per click), and the option list no longer matches what the client is answering about --
+	// stock would fall through to "chose an option they don't have" and teleport a just-rezzed
+	// player to their bind point.
+	if (!IsHoveringForRespawn()) {
+		LogSpells("Ignoring respawn selection [{}] from [{}] - no longer hovering", Option, GetName());
+		return;
+	}
+
+	// NOTE: the hover timer is deliberately NOT disabled here. Stock disabled it up front, which
+	// turned every early return below into a permanent lock: the player stayed `dead`, their
+	// respawn window was already closed client-side, and nothing was left to time out and send
+	// them to their bind. Each committed path disables it itself instead.
 
 	// RESPAWNDBG (temporary diagnostic — remove after the respawn revive is understood)
 	LogError("RESPAWNDBG enter: Option [{}] cur_hp [{}] max_hp [{}] dead [{}] cur_zone [{}]",
@@ -2181,7 +2297,9 @@ void Client::HandleRespawnFromHover(uint32 Option)
 	bool is_rez = false;
 
 	//Find the selected option
-	if (Option == 0)
+	// (AKK-STACK: guard the empty list -- front() on it is undefined behaviour, and a quest script
+	// is free to ClearRespawnOptions() while we hover. A null `chosen` falls through to bind below.)
+	if (Option == 0 && !respawn_options.empty())
 	{
 		chosen = &respawn_options.front();
 	}
@@ -2229,39 +2347,27 @@ void Client::HandleRespawnFromHover(uint32 Option)
 			if (PendingRezzXP < 0 || PendingRezzSpellID == 0)
 			{
 				LogSpells("Unexpected Rezz from hover request");
+				// AKK-STACK FIX: never strand them here. This is reached when the rez was already
+				// consumed (most often by accepting it from the client's confirmation box a moment
+				// earlier), and stock left the player dead, hovering-flag cleared, with no window
+				// and no timer -- a lock only a relog cleared. Stay hovering and put the window back.
+				Message(Chat::Red, "That resurrection is no longer available.");
+				ResendRespawnWindow();
 				safe_delete(default_to_bind);
 				return;
 			}
-			SetHP(GetMaxHP() / 5);
 
+			// The rez lands on the corpse; fall back to where we are hovering if it is gone.
 			Corpse* corpse = entity_list.GetCorpseByName(PendingRezzCorpseName.c_str());
 
-			if (corpse)
-			{
-				m_Position.x = corpse->GetX();
-				m_Position.y = corpse->GetY();
-				m_Position.z = corpse->GetZ();
-			}
+			const float rez_x = corpse ? corpse->GetX() : GetX();
+			const float rez_y = corpse ? corpse->GetY() : GetY();
+			const float rez_z = corpse ? corpse->GetZ() : GetZ();
 
-			auto outapp =
-			    new EQApplicationPacket(OP_ZonePlayerToBind, sizeof(ZonePlayerToBind_Struct) + 10);
-			ZonePlayerToBind_Struct* gmg = (ZonePlayerToBind_Struct*) outapp->pBuffer;
-
-			gmg->bind_zone_id = zone->GetZoneID();
-			gmg->bind_instance_id = zone->GetInstanceID();
-			gmg->x = GetX();
-			gmg->y = GetY();
-			gmg->z = GetZ();
-			gmg->heading = GetHeading();
-			strcpy(gmg->zone_name, "Resurrect");
-
-			FastQueuePacket(&outapp);
-
-			ClearHover();
-			// AKK-STACK FIX: forced — see the non-rez branch below (unforced dedupes when
-			// last_hp was recorded while our entity id was still 0).
-			SendHPUpdate(true);
-			OPRezzAnswer(1, PendingRezzSpellID, zone->GetZoneID(), zone->GetInstanceID(), GetX(), GetY(), GetZ());
+			// AKK-STACK FIX: we are still hovering, which is what tells OPRezzAnswer() to run the
+			// hover exit (ExitHoverForRezz) before it applies the rez -- one implementation shared
+			// with a rez accepted from the client's own confirmation box.
+			OPRezzAnswer(1, PendingRezzSpellID, zone->GetZoneID(), zone->GetInstanceID(), rez_x, rez_y, rez_z);
 
 			if (corpse && corpse->IsCorpse())
 			{
@@ -2276,6 +2382,10 @@ void Client::HandleRespawnFromHover(uint32 Option)
 		}
 		else //Not rez
 		{
+			// AKK-STACK: committed to this respawn, so leave the hover state (see the note at the
+			// top of this function about why it is not disabled up front).
+			RespawnFromHoverTimer.Disable();
+
 			PendingRezzSpellID = 0;
 
 			LogError("RESPAWNDBG same-zone nonrez BEFORE revive: cur_hp [{}] max_hp [{}] dead [{}]",
@@ -2336,11 +2446,20 @@ void Client::HandleRespawnFromHover(uint32 Option)
 		//Pop Rez option from the respawn options list;
 		//easiest way to make sure it stays at the end and
 		//doesn't disrupt adding/removing scripted options
-		respawn_options.pop_back();
+		// (AKK-STACK: the rez path already dropped it in ExitHoverForRezz, and an empty list would
+		// mean eating a real option next time -- guard both.)
+		if (!is_rez && !respawn_options.empty()) {
+			respawn_options.pop_back();
+		}
 	}
 	else
 	{
 		//Heading to a different zone
+		// AKK-STACK: committed -- leave the hover state before the Save() below, or the client
+		// destructor's IsHoveringForRespawn() branch would rewrite our destination to the bind
+		// point as we zone out.
+		RespawnFromHoverTimer.Disable();
+
 		LogError("RESPAWNDBG cross-zone: chosen_zone [{}] cur_hp [{}] max_hp [{}] dead [{}]",
 			chosen->zone_id, GetHP(), GetMaxHP(), dead ? 1 : 0);
 		if(isgrouped)
