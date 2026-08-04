@@ -2149,7 +2149,11 @@ void Client::AutoGrantAAPoints() {
 		}
 	}
 
-	SendClearLeadershipAA();
+	// akk-stack: do NOT SendClearLeadershipAA() here. Leadership AAs are a separate
+	// system this function never touches, and nothing re-sends them afterwards - the
+	// ranks only reach the client in the PlayerProfile, which was already delivered in
+	// Handle_Connect_OP_ZoneEntry. Clearing here wiped purchased LAAs from the client's
+	// window on every zone-in (server + DB kept them, so it was display-only).
 	SendClearPlayerAA();
 	SendAlternateAdvancementTable();
 	SendAlternateAdvancementPoints();
@@ -2187,7 +2191,8 @@ void Client::GrantAllAAPoints(uint8 unlock_level, bool skip_grant_only)
 	}
 
 	SaveAA();
-	SendClearLeadershipAA();
+	// akk-stack: see AutoGrantAAPoints() above - clearing leadership AAs here is a
+	// display-only data loss, this function grants regular AAs only.
 	SendClearPlayerAA();
 	SendAlternateAdvancementTable();
 	SendAlternateAdvancementPoints();
