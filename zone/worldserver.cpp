@@ -930,6 +930,19 @@ void WorldServer::HandleMessage(uint16 opcode, const EQ::Net::Packet &p)
 				client->SetPendingRezzData(srs->exp, srs->dbid, srs->rez.spellid, srs->rez.corpse_name);
 				LogSpells("[WorldServer::HandleMessage] OP_RezzRequest in zone [{}] for [{}] spellid [{}]",
 					zone->GetShortName(), client->GetName(), srs->rez.spellid);
+
+				// AKK-STACK FIX: put the death chooser back before the rez request lands. For a
+				// corpse in the CURRENT zone the RoF2 client never raises a confirmation box and
+				// never sends OP_RezzAnswer -- its OP_RezzRequest handler just pokes pRespawnWnd
+				// (0x52e18e) and returns, so the respawn window is the one and only way to accept.
+				// A player whose window is missing for any reason therefore cannot take the rez at
+				// all, and is stuck as a corpse until the hover timer force-binds them. Re-sending
+				// it here is cheap, costs nothing when the window is already up, and turns that
+				// dead end into a recoverable one.
+				if (client->IsHoveringForRespawn()) {
+					client->ResendRespawnWindow();
+				}
+
 				auto outapp = new EQApplicationPacket(OP_RezzRequest,
 					sizeof(Resurrect_Struct));
 				memcpy(outapp->pBuffer, &srs->rez, sizeof(Resurrect_Struct));
