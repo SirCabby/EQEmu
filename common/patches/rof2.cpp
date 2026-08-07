@@ -4548,7 +4548,21 @@ namespace RoF2
 
 		__packet->SetWritePosition(0);
 		__packet->WriteUInt16(emu->bind_zone_id);
-		__packet->WriteUInt16(emu->bind_instance_id);
+		// AKK-STACK FIX: the instance id MUST stay zero here. The RoF2 client reads the first four
+		// bytes of this packet as ONE uint32 zone id (its handler at 0x4c8af4 deserializes five
+		// dwords -- zone, x, y, z, heading -- then does `cmp eax, [current_zone_id]`), so an
+		// instance id written into the upper half turns the zone id into (instance << 16 | zone).
+		// The same-zone test then fails and the client falls into its "repop to home at death"
+		// branch, trying to zone to a garbage zone id that does not exist. It has already closed
+		// the respawn window by that point, so the player is left permanently dead: still a corpse
+		// client-side (pinstLocalPlayer Type stays >= 2, name still "<Name>'s corpse<id>"), with no
+		// chooser and no way out but a relog. That is exactly what a same-zone rez did in any zone
+		// served through a non-zero instance -- the classic-clone zones (lavastorm_classic 990 /
+		// inst 12, nektulos_classic 991 / inst 13, bazaar_classic 992) and every private instance --
+		// because SendRespawnBinds() stamps the "Resurrect" option with zone->GetInstanceID().
+		// The client cannot act on an instance id anyway: instance routing is entirely server-side
+		// (see Client::ZonePC), so nothing is lost by zeroing it.
+		__packet->WriteUInt16(0);
 		__packet->WriteFloat(emu->x);
 		__packet->WriteFloat(emu->y);
 		__packet->WriteFloat(emu->z);

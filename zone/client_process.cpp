@@ -1064,11 +1064,17 @@ void Client::OPRezzAnswer(uint32 Action, uint32 SpellID, uint16 ZoneID, uint16 I
 		const bool from_hover = IsHoveringForRespawn();
 		const bool same_zone  = (ZoneID == zone->GetZoneID() && InstanceID == zone->GetInstanceID());
 
+		// AKK-STACK: every ordinary rez stands the player back up at Character:ResurrectionHealthPercent
+		// of their max HP (35 by default). Stock hard-coded 20% on the rez-effect path and 5% on the
+		// plain one; a full-heal rez (SPELL_DIVINE_REZ, below) still restores everything.
+		const int64 resurrection_hp_raw = (GetMaxHP() * RuleI(Character, ResurrectionHealthPercent)) / 100;
+		const int64 resurrection_hp     = resurrection_hp_raw > 1 ? resurrection_hp_raw : 1;
+
 		if (from_hover) {
 			if (GetHP() <= 0) {
 				// Provisional, so the corpse's -100 does not go out in the re-spawn packet; the
 				// rez effects below set the real value.
-				SetHP(GetMaxHP() / 5);
+				SetHP(resurrection_hp);
 			}
 
 			if (same_zone) {
@@ -1108,7 +1114,7 @@ void Client::OPRezzAnswer(uint32 Action, uint32 SpellID, uint16 ZoneID, uint16 I
 		int SpellEffectDescNum = GetSpellEffectDescriptionNumber(SpellID);
 		// Rez spells with Rez effects have this DescNum (first is Titanium, second is 6.2 Client)
 		if(RuleB(Character, UseResurrectionSickness) && SpellEffectDescNum == 82 || SpellEffectDescNum == 39067) {
-			SetHP(GetMaxHP() / 5);
+			SetHP(resurrection_hp);
 			SetMana(0);
 
 			if (RuleB(Spells, BuffsFadeOnDeath)) {
@@ -1145,7 +1151,7 @@ void Client::OPRezzAnswer(uint32 Action, uint32 SpellID, uint16 ZoneID, uint16 I
 				}
 			}
 
-			SetHP(GetMaxHP() / 20);
+			SetHP(resurrection_hp);
 			SetMana(GetMaxMana() / 20);
 			SetEndurance(GetMaxEndurance() / 20);
 		}
@@ -2235,11 +2241,16 @@ void Client::ExitHoverForRezz(float x, float y, float z)
 
 	// Tells the client it has respawned in place at the corpse. bind_zone_id is this zone (not
 	// the 0 "old hack") because that is what the SoF-and-later hover path expects.
+	//
+	// bind_instance_id is deliberately left at 0 -- the RoF2 client reads the zone id and the
+	// instance id as a single uint32 zone id, so a non-zero instance made it miss the same-zone
+	// branch and strand the player as a corpse. ENCODE(OP_ZonePlayerToBind) in rof2.cpp forces it
+	// to zero on the wire regardless; see the comment there for the full story.
 	auto outapp = new EQApplicationPacket(OP_ZonePlayerToBind, sizeof(ZonePlayerToBind_Struct) + 10);
 	ZonePlayerToBind_Struct* gmg = (ZonePlayerToBind_Struct*) outapp->pBuffer;
 
 	gmg->bind_zone_id     = zone->GetZoneID();
-	gmg->bind_instance_id = zone->GetInstanceID();
+	gmg->bind_instance_id = 0;
 	gmg->x                = GetX();
 	gmg->y                = GetY();
 	gmg->z                = GetZ();
