@@ -800,6 +800,7 @@ public:
 	void RemoveFromInstance(uint16 instance_id);
 	void WhoAll();
 	bool CheckLoreConflict(const EQ::ItemData* item);
+	const EQ::ItemData* CheckLoreConflictLeavingBank(const EQ::ItemInstance* inst, int16 dst_slot_id);
 	void ChangeLastName(std::string last_name);
 	void GetGroupAAs(GroupLeadershipAA_Struct *into) const;
 	void GetRaidAAs(RaidLeadershipAA_Struct *into) const;

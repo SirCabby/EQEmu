@@ -31,6 +31,24 @@
 extern WorldServer worldserver;
 extern QueryServ  *QServ;
 
+// akk-stack: the bank is exempt from lore. Duplicates may sit in the bank, and a banked copy never
+// blocks acquiring another one -- lore uniqueness is enforced only over what a character actually
+// carries (worn / inventory / cursor / trade). The shared bank was already exempt upstream.
+// Personal-bank pages that are not currently loaded live in `character_bank`, not in m_inv, so they
+// are outside every lore check by construction.
+static constexpr uint8 LORE_SCOPE = static_cast<uint8>(~(invWhereSharedBank | invWhereBank));
+
+// the same scope minus the cursor queue, for the checks whose subject is itself sitting on the cursor
+static constexpr uint8 LORE_SCOPE_NO_CURSOR = static_cast<uint8>(LORE_SCOPE & ~invWhereCursor);
+
+// true when `slot` is a personal-bank slot (bank window or a bag inside it). Unlike Client::IsBankSlot
+// this excludes the shared bank, which has its own rules.
+static bool IsPersonalBankSlot(int16 slot)
+{
+	return EQ::ValueWithin(slot, EQ::invslot::BANK_BEGIN, EQ::invslot::BANK_END) ||
+	       EQ::ValueWithin(slot, EQ::invbag::BANK_BAGS_BEGIN, EQ::invbag::BANK_BAGS_END);
+}
+
 // @merth: this needs to be touched up
 uint32 Client::NukeItem(uint32 itemnum, uint8 where_to_check) {
 	if (itemnum == 0)
@@ -174,11 +192,79 @@ bool Client::CheckLoreConflict(const EQ::ItemData* item)
 	if (!item->LoreFlag) { return false; }
 	if (item->LoreGroup == 0) { return false; }
 
-	if (item->LoreGroup == -1) // Standard lore items; look everywhere except the shared bank, return the result
-		return (m_inv.HasItem(item->ID, 0, ~invWhereSharedBank) != INVALID_INDEX);
+	if (item->LoreGroup == -1) // Standard lore items; look everywhere except the banks, return the result
+		return (m_inv.HasItem(item->ID, 0, LORE_SCOPE) != INVALID_INDEX);
 
 	// If the item has a lore group, we check for other items with the same group and return the result
-	return (m_inv.HasItemByLoreGroup(item->LoreGroup, ~invWhereSharedBank) != INVALID_INDEX);
+	return (m_inv.HasItemByLoreGroup(item->LoreGroup, LORE_SCOPE) != INVALID_INDEX);
+}
+
+// akk-stack (bank-exempt lore): would handing `inst` to `dst_slot_id` leave a second copy of some
+// lore item outside the bank? Returns the offending item, or nullptr when the move is clean. Used to
+// gate items leaving the bank, which is the one move that can break the invariant now that banked
+// copies are invisible to CheckLoreConflict. Whatever currently occupies `dst_slot_id` is on its way
+// into the bank (a swap), so it does not count as a conflict. Augments and, for a container,
+// everything inside it move along with the item and are checked too -- including against each other,
+// since the bank is allowed to hold duplicates that would come out together.
+const EQ::ItemData *Client::CheckLoreConflictLeavingBank(const EQ::ItemInstance *inst, int16 dst_slot_id)
+{
+	if (!inst) {
+		return nullptr;
+	}
+
+	std::set<int64> moving; // lore identity: group id, or (1<<32 | item id) for ungrouped (-1) lore
+
+	auto conflicts = [&](const EQ::ItemData *item) {
+		if (!item || !item->LoreFlag || item->LoreGroup == 0) {
+			return false;
+		}
+
+		const bool  ungrouped = (item->LoreGroup == -1);
+		const int64 key       = ungrouped ? ((int64) 1 << 32 | item->ID) : item->LoreGroup;
+
+		if (!moving.insert(key).second) {
+			return true; // a second copy of it is already riding along in this same move
+		}
+
+		const int16 found = ungrouped ? m_inv.HasItem(item->ID, 0, LORE_SCOPE)
+		                              : m_inv.HasItemByLoreGroup(item->LoreGroup, LORE_SCOPE);
+
+		return found != INVALID_INDEX && found != dst_slot_id;
+	};
+
+	auto blocked_by = [&](const EQ::ItemInstance *i) -> const EQ::ItemData * {
+		if (conflicts(i->GetItem())) {
+			return i->GetItem();
+		}
+
+		for (uint8 idx = EQ::invaug::SOCKET_BEGIN; idx <= EQ::invaug::SOCKET_END; idx++) {
+			const EQ::ItemInstance *aug = i->GetAugment(idx);
+			if (aug && conflicts(aug->GetItem())) {
+				return aug->GetItem();
+			}
+		}
+
+		return nullptr;
+	};
+
+	if (const EQ::ItemData *blocked = blocked_by(inst)) {
+		return blocked;
+	}
+
+	if (inst->IsClassBag()) {
+		for (uint8 idx = EQ::invbag::SLOT_BEGIN; idx <= EQ::invbag::SLOT_END; idx++) {
+			const EQ::ItemInstance *bagged = inst->GetItem(idx);
+			if (!bagged) {
+				continue;
+			}
+
+			if (const EQ::ItemData *blocked = blocked_by(bagged)) {
+				return blocked;
+			}
+		}
+	}
+
+	return nullptr;
 }
 
 bool Client::SummonItem(uint32 item_id, int16 charges, uint32 aug1, uint32 aug2, uint32 aug3, uint32 aug4, uint32 aug5, uint32 aug6, bool attuned, uint16 to_slot, uint32 ornament_icon, uint32 ornament_idfile, uint32 ornament_hero_model) {
@@ -928,10 +1014,10 @@ void Client::SendCursorBuffer()
 
 	bool lore_pass = true;
 	if (test_item->LoreGroup == -1) {
-		lore_pass = (m_inv.HasItem(test_item->ID, 0, ~(invWhereSharedBank | invWhereCursor)) == INVALID_INDEX);
+		lore_pass = (m_inv.HasItem(test_item->ID, 0, LORE_SCOPE_NO_CURSOR) == INVALID_INDEX);
 	}
 	else if (test_item->LoreGroup != 0) {
-		lore_pass = (m_inv.HasItemByLoreGroup(test_item->LoreGroup, ~(invWhereSharedBank | invWhereCursor)) == INVALID_INDEX);
+		lore_pass = (m_inv.HasItemByLoreGroup(test_item->LoreGroup, LORE_SCOPE_NO_CURSOR) == INVALID_INDEX);
 	}
 
 	if (!lore_pass) {
@@ -1632,10 +1718,10 @@ bool Client::SwapItem(MoveItem_Struct* move_in) {
 
 			bool lore_pass = true;
 			if (test_item->LoreGroup == -1) {
-				lore_pass = (m_inv.HasItem(test_item->ID, 0, ~(invWhereSharedBank | invWhereCursor)) == INVALID_INDEX);
+				lore_pass = (m_inv.HasItem(test_item->ID, 0, LORE_SCOPE_NO_CURSOR) == INVALID_INDEX);
 			}
 			else if (test_item->LoreGroup != 0) {
-				lore_pass = (m_inv.HasItemByLoreGroup(test_item->LoreGroup, ~(invWhereSharedBank | invWhereCursor)) == INVALID_INDEX);
+				lore_pass = (m_inv.HasItemByLoreGroup(test_item->LoreGroup, LORE_SCOPE_NO_CURSOR) == INVALID_INDEX);
 			}
 
 			if (!lore_pass) {
@@ -1905,6 +1991,22 @@ bool Client::SwapItem(MoveItem_Struct* move_in) {
 		DeleteItemInInventory(src_slot_id);
 		WorldKick();
 		return false;
+	}
+
+	// akk-stack (bank-exempt lore): banked copies are invisible to CheckLoreConflict, so taking one
+	// back out is the only move that can leave a character holding two of the same lore item. Refuse
+	// it here -- the client is resynced by the caller when SwapItem fails.
+	if (IsPersonalBankSlot(src_slot_id) && !IsPersonalBankSlot(dst_slot_id)) {
+		if (const EQ::ItemData *blocked = CheckLoreConflictLeavingBank(src_inst, dst_slot_id)) {
+			Message(
+				Chat::Red,
+				fmt::format(
+					"You cannot take {} out of the bank while you already have one.",
+					database.CreateItemLink(blocked->ID)
+				).c_str()
+			);
+			return false;
+		}
 	}
 
 	// Step 3: Check for interaction with World Container (tradeskills)
@@ -2807,6 +2909,13 @@ void Client::RemoveDuplicateLore()
 		}
 
 		if (slot_id >= EQ::invbag::SHARED_BANK_BAGS_BEGIN && slot_id <= EQ::invbag::SHARED_BANK_BAGS_END) {
+			continue;
+		}
+
+		// akk-stack: the bank is lore-exempt, so a banked copy is never the duplicate to delete --
+		// without this, logging in with one on your person and one in the bank would destroy the
+		// banked one.
+		if (IsPersonalBankSlot(slot_id)) {
 			continue;
 		}
 

@@ -596,12 +596,11 @@ bool Object::HandleClick(Client* sender, const ClickObject_Struct* click_object)
 			if (sender->CheckLoreConflict(item)) {
 				duplicate_lore = true;
 
-				const int16 lore_item_slot = sender->GetInv().HasItem(item->ID, 0, invWhereBank);
-				if (lore_item_slot != INVALID_INDEX) { // if the duplicate is in the bank, delete it.
-					sender->DeleteItemInInventory(lore_item_slot);
-				} else { // otherwise, we delete the new one
-					cursor_delete = true;
-				}
+				// akk-stack (bank-exempt lore): upstream sacrificed a banked copy so the picked-up one
+				// could be kept. The bank is now outside the lore scope entirely -- a conflict here is
+				// always with something the character is carrying, and a banked copy is a legal one to
+				// keep -- so the new item is what goes.
+				cursor_delete = true;
 			}
 
 			if (item->RecastDelay) {
