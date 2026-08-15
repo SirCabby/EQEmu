@@ -3656,7 +3656,14 @@ void Mob::SendIllusionPacket(const AppearanceStruct& a)
 		(a.race_id ? GetDefaultGender(a.race_id, a.gender_id) : GetBaseGender())
 	);
 
-	float new_size = a.size <= 0.0f ? GetRaceGenderDefaultHeight(race, gender) : a.size;
+	// When the caller does not pick a size, default to the height of the appearance we are
+	// APPLYING -- `race`/`gender` are still the pre-illusion values here (they are only assigned
+	// further down). Reading them left `size` (and the size field of the outgoing OP_Illusion) at
+	// the height of the race being replaced, so e.g. an ogre under a dark elf illusion rendered a
+	// dark elf scaled to 9 units. The cast-time path hid it by following up with an explicit
+	// AppearanceType::Size packet, but the stale `size` survived on the mob and got replayed to
+	// every client that later zoned in (EntityList::SendZoneAppearance).
+	float new_size = a.size <= 0.0f ? GetRaceGenderDefaultHeight(new_race, new_gender) : a.size;
 
 	uint8 new_texture        = a.texture == UINT8_MAX && !IsPlayerRace(a.race_id) ? GetTexture() : a.texture;
 	uint8 new_helmet_texture = a.helmet_texture == UINT8_MAX && !IsPlayerRace(race) ? GetHelmTexture() : a.helmet_texture;
@@ -3711,11 +3718,24 @@ void Mob::SendIllusionPacket(const AppearanceStruct& a)
 
 	// These two should not be modified in base data - it kills db texture
 	// when illusion is only for RandomizeFeatures...
+	//
+	// ...but a Client has no db texture to protect: `Client::Client` constructs with texture and
+	// helmtexture = UINT8_MAX and nothing else ever assigns them, so a value left behind by an earlier
+	// illusion is pure corruption. It poisons `Mob::FillSpawnStruct`, whose `texture != UINT8_MAX` loop
+	// then overwrites EVERY armor material in the spawn struct with it - so a player who has worn any
+	// illusion renders with no helm and no armor for every client that zones in afterwards, and stays
+	// that way for the rest of the zone session because the illusion wearing off never wrote them back.
+	// Reset for players rather than keeping the stale value.
 	if (new_helmet_texture != UINT8_MAX) {
 		helmtexture      = new_helmet_texture;
+	} else if (IsClient()) {
+		helmtexture      = UINT8_MAX;
 	}
+
 	if (new_texture != UINT8_MAX) {
 		texture          = new_texture;
+	} else if (IsClient()) {
+		texture          = UINT8_MAX;
 	}
 
 	auto outapp = new EQApplicationPacket(OP_Illusion, sizeof(Illusion_Struct));
@@ -3749,6 +3769,19 @@ void Mob::SendIllusionPacket(const AppearanceStruct& a)
 
 	/* Refresh armor and tints after send illusion packet */
 	SendArmorAppearance();
+
+	// SendArmorAppearance() deliberately skips Clients (their gear rides the spawn struct), but the
+	// client tears the actor down and rebuilds it on OP_Illusion, and its own post-illusion re-dress
+	// only walks armor slots 0-6 - a player's HELD items (primary/secondary) come back empty-handed and
+	// stay invisible until they re-equip or zone. Re-send the whole material set for players. The
+	// dedupe cache has to be dropped by hand: SendWearChange only clears it when the race CHANGES, and
+	// an illusion re-cast (or one onto the race you already are) rebuilds the actor just the same.
+	if (IsClient()) {
+		m_last_seen_wearchange.clear();
+		for (uint8 slot_id = EQ::textures::textureBegin; slot_id <= EQ::textures::LastTexture; ++slot_id) {
+			SendWearChange(slot_id);
+		}
+	}
 
 	if (a.send_effects) {
 		SendSavedAppearanceEffects(nullptr);

@@ -1518,7 +1518,9 @@ bool Mob::SpellEffect(Mob* caster, uint16 spell_id, float partial, int level_ove
 						);
 						caster->SendAppearancePacket(AppearanceType::Size, static_cast<uint32>(caster->GetTarget()->GetSize()));
 
-						for (int x = EQ::textures::textureBegin; x <= EQ::textures::LastTintableTexture; x++)
+						// LastTexture, not LastTintableTexture: the actor rebuild an illusion triggers
+						// also drops held item models, and slots 7/8 are outside the tintable range.
+						for (int x = EQ::textures::textureBegin; x <= EQ::textures::LastTexture; x++)
 							caster->SendWearChange(x);
 				}
 				break;
@@ -4342,16 +4344,22 @@ void Mob::BuffFadeBySlot(int slot, bool iRecalcBonuses)
 			case SpellEffect::IllusionCopy:
 			case SpellEffect::Illusion:
 			{
+				// texture 0 here did the same damage as it does on the way IN (see
+				// ApplySpellEffectIllusion): it told every observer to repaint the now un-illusioned
+				// player with texture 0, and left texture/helmtexture = 0 stuck on the mob so later
+				// zone-ins kept seeing them stripped. UINT8_MAX restores the real equipment look.
 				SendIllusionPacket(
 					AppearanceStruct{
 						.gender_id = GetBaseGender(),
 						.race_id = GetBaseRace(),
 						.size = GetDefaultRaceSize(GetBaseRace(), GetBaseGender()),
-						.texture = 0
+						.texture = UINT8_MAX
 					}
 				);
 
-				for (int x = EQ::textures::textureBegin; x <= EQ::textures::LastTintableTexture; x++) {
+				// LastTexture, not LastTintableTexture: the rebuild the client does for an illusion
+				// change drops held item models too, and slots 7/8 are outside the tintable range.
+				for (int x = EQ::textures::textureBegin; x <= EQ::textures::LastTexture; x++) {
 					SendWearChange(x);
 				}
 
@@ -10512,12 +10520,20 @@ void Mob::ApplySpellEffectIllusion(int32 spell_id, Mob *caster, int buffslot, in
 					}
 				}
 			} else {
+				// max <= 0 here, so `max` is not a helm texture, it is just zero - and limit is the
+				// texture only when it is set. Passing the literal 0s means "paint texture 0 over every
+				// armor slot": the client repaints slots 0-6 from the illusion's texture field whenever
+				// it is not UINT8_MAX, so the wearer loses their helm and armor for every observer, and
+				// SendIllusionPacket persists texture/helmtexture = 0 on the mob, which then poisons
+				// FillSpawnStruct for everyone who zones in afterwards. Send UINT8_MAX = "leave alone"
+				// so the client re-dresses from the real equipment instead. All 89 of the plain
+				// race-illusion spells (Illusion: Dark Elf, Ogre, ...) take this branch.
 				SendIllusionPacket(
 					AppearanceStruct{
 						.gender_id = static_cast<uint8>(gender_id),
-						.helmet_texture = static_cast<uint8>(max),
+						.helmet_texture = static_cast<uint8>(max > 0 ? max : UINT8_MAX),
 						.race_id = static_cast<uint16>(base),
-						.texture = static_cast<uint8>(limit),
+						.texture = static_cast<uint8>(limit > 0 ? limit : UINT8_MAX),
 					}
 				);
 			}

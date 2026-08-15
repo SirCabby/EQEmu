@@ -16802,13 +16802,21 @@ void Client::Handle_OP_WearChange(const EQApplicationPacket *app)
 	if (wc->spawn_id != GetID())
 		return;
 
-	// Hero Forge ID needs to be fixed here as RoF2 appears to send an incorrect value.
-	if (wc->wear_slot_id >= 0 && wc->wear_slot_id < EQ::textures::weaponPrimary)
-		wc->hero_forge_model = GetHerosForgeModel(wc->wear_slot_id);
+	if (wc->wear_slot_id >= EQ::textures::materialCount) {
+		return;
+	}
 
-	// we could maybe ignore this and just send our own from moveitem
-	// We probably need to skip this entirely when it is send as an ack, but not sure how to ID that.
-	entity_list.QueueClients(this, app, true);
+	// This used to relay the client's packet verbatim ("we could maybe ignore this and just send our
+	// own from moveitem / we probably need to skip this entirely when it is sent as an ack, but not
+	// sure how to ID that"). That is exactly the hole it sounds like: the client echoes wear changes
+	// back at us, and after an illusion rebuild it echoes slot 0 with material 0 while its own actor
+	// still wears the helm. Relayed as-is, that stripped the wearer's helm on every OTHER client
+	// (QueueClients skips the sender) while looking correct on their own screen.
+	//
+	// There is nothing in this packet the server does not already know, so ack-vs-real stops mattering:
+	// send OUR material for that slot. Authoritative, idempotent, reaches the sender too, and
+	// SendWearChange's dedupe makes a genuine ack cost nothing.
+	SendWearChange(wc->wear_slot_id);
 }
 
 void Client::Handle_OP_WhoAllRequest(const EQApplicationPacket *app)
