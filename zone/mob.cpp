@@ -1581,6 +1581,19 @@ void Mob::SendHPUpdate(bool force_update_all)
 	// update those who have us targeted
 	entity_list.QueueClientsByTarget(this, &hp_packet, false, 0, false, true, EQ::versions::maskAllClients);
 
+	// rof2ClientPlus nameplate health bars: the client applies OP_MobHealth to ANY spawn in its
+	// spawn list (SetSpawnHP@0x4bd0e0 just looks the id up and stores the percent), but stock only
+	// tells the clients that have the mob TARGETED - so an over-the-head health bar froze at
+	// whatever percent the mob had when it spawned. Also tell everyone else in range. Cheap: we
+	// only get here when the percent actually CHANGED (the last_hp_percent gate above), the packet
+	// is 3 bytes, it is sent unreliably, and QueueCloseClients walks the mob's close list rather
+	// than every client in the zone. Skip the sender - a client that receives its own OP_MobHealth
+	// takes the "this is the local player" branch, which stores the percent as a raw current-HP
+	// value against the real max and would wreck its own HP display.
+	if (RuleB(Client, RcpBroadcastHealth)) {
+		entity_list.QueueCloseClients(this, &hp_packet, true, 0, nullptr, false);
+	}
+
 	// Update those who have us on x-target
 	entity_list.QueueClientsByXTarget(this, &hp_packet, false);
 
