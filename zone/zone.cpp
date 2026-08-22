@@ -1155,6 +1155,45 @@ bool Zone::Init(bool is_static) {
 	LogInfo("Loading timezone data");
 	zone_time.setEQTimeZone(content_db.GetZoneTimezone(zoneid, GetInstanceVersion()));
 
+	// AKK-STACK FIX (day/night boot): seed the clock from the `eqtime` row before anything
+	// in Init reads it.
+	//
+	// A freshly constructed Zone carries EQTime's placeholder clock -- year 3100, 09:00 --
+	// and only learns the real time when world answers the SyncWorldTime request, which is
+	// sent AFTER Init has already finished. spawn_conditions.LoadSpawnConditions() and
+	// PopulateZoneSpawnList() both run inside Init, so every zone used to pick its day/night
+	// spawn set off that placeholder: events dated later than year 3100 looked like they had
+	// not happened yet, no catch-up ran, and the zone came up holding whatever
+	// `spawn_condition_values` last persisted -- for Kithicor, day AND night both off, so 32
+	// of 343 spawn points.
+	//
+	// SpawnConditionManager::Process() does catch up afterwards, but only ONE period per
+	// event per EQ minute (minute_timer, 3s), so a zone that has been down for N EQ days
+	// needs 3N seconds of a player standing in it. Kithicor was ~56 EQ days behind (about
+	// three minutes); gfaydark's events were centuries behind, which is a week of real time.
+	//
+	// This is exact rather than approximate: `eqtime` stores the EQ time together with the
+	// real timestamp it was written at, and SetCurrentEQTimeOfDay anchors on that pair, so a
+	// row saved up to 10 minutes ago (world's save interval) still yields the correct time
+	// now. It is the same call world itself boots from. If the row is missing, LoadTime
+	// hands back the same year-3100 placeholder we had before, so this can only improve.
+	time_t   eq_time_realtime = 0;
+	const TimeOfDay_Struct eq_time_of_day = database.LoadTime(eq_time_realtime);
+	if (eq_time_realtime) {
+		zone_time.SetCurrentEQTimeOfDay(eq_time_of_day, eq_time_realtime);
+
+		TimeOfDay_Struct seeded_tod{};
+		zone_time.GetCurrentEQTimeOfDay(time(nullptr), &seeded_tod);
+		LogInfo(
+			"Seeded zone clock from eqtime | year [{}] month [{}] day [{}] hour [{}] minute [{}]",
+			seeded_tod.year,
+			seeded_tod.month,
+			seeded_tod.day,
+			seeded_tod.hour - 1,
+			seeded_tod.minute
+		);
+	}
+
 	LoadLDoNTraps();
 	LoadLDoNTrapEntries();
 

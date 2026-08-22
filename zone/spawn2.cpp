@@ -1023,8 +1023,38 @@ bool SpawnConditionManager::LoadSpawnConditions(const std::string& zone_short_na
 	TimeOfDay_Struct tod{};
 	zone->zone_time.GetCurrentEQTimeOfDay(&tod);
 
-	for (auto& e : spawn_events) {
-		bool is_strict = false;
+	// AKK-STACK FIX (day/night boot): replay the missed events in CHRONOLOGICAL order.
+	//
+	// Upstream caught each event up on its own while walking `spawn_events` in table
+	// order, so for a condition driven by an Enable/Disable pair the LAST-LISTED row won
+	// no matter what time of day it actually was. For most day/night zones that row is
+	// the Disable one, so a freshly booted zone landed with day AND night both off and
+	// only its unconditional spawn points came up -- Kithicor kept 32 of 343 points. The
+	// value is then persisted by SetCondition, so it sticks. It read as intermittent
+	// because a zone that stays booted gets corrected by SpawnConditionManager::Process().
+	//
+	// This has to be right *here*: LoadSpawnConditions runs immediately before
+	// PopulateZoneSpawnList in both Zone::Init and Zone::Repop, so a wrong value at this
+	// point means the zone spawns the wrong set on its very first frame, and nothing
+	// outside the zone process can put it right -- EntityList::MobProcess skips
+	// NPC::Process entirely while a zone holds no clients, so a quest-driven resync
+	// cannot even run until a player is already standing in the empty zone.
+	//
+	// Same firings, same strict / period / ExecEvent handling as before; only the order
+	// changes. Always fire whichever pending event is earliest, so every condition ends
+	// on the argument of its most recent transition, exactly as if the zone had been up.
+
+	std::vector<bool> event_is_strict(spawn_events.size(), false);
+	std::vector<bool> event_pending(spawn_events.size(), false);
+	std::vector<bool> event_ran(spawn_events.size(), false);
+
+	std::map<uint16, int16> condition_value_before;
+	for (const auto& c : spawn_conditions) {
+		condition_value_before[c.first] = c.second.value;
+	}
+
+	for (size_t i = 0; i < spawn_events.size(); ++i) {
+		auto& e = spawn_events[i];
 
 		if (
 			e.strict &&
@@ -1033,11 +1063,11 @@ bool SpawnConditionManager::LoadSpawnConditions(const std::string& zone_short_na
 			e.next.month == tod.month &&
 			e.next.year == tod.year
 		) {
-			is_strict = true;
+			event_is_strict[i] = true;
 		}
 
 		//If event is disabled, or we failed the strict check, set initial spawn_condition to default startup value from spawn_conditions.
-		if (!e.enabled || !is_strict) {
+		if (!e.enabled || !event_is_strict[i]) {
 			SetCondition(
 				zone->GetShortName(),
 				zone->GetInstanceID(),
@@ -1065,24 +1095,160 @@ bool SpawnConditionManager::LoadSpawnConditions(const std::string& zone_short_na
 			continue;
 		}
 
-		bool ran = false;
-		while (EQTime::IsTimeBefore(&tod, &e.next)) {
-			LogSpawns("Catch up triggering on event [{}]", e.id);
-			//this event has been triggered.
-			//execute the event
-			if (!e.strict || is_strict) {
-				ExecEvent(e, false);
+		event_pending[i] = EQTime::IsTimeBefore(&tod, &e.next);
+	}
+
+	//drain the missed firings earliest-first, so the most recent transition is the one that sticks
+	while (true) {
+		size_t next_index = spawn_events.size();
+
+		for (size_t i = 0; i < spawn_events.size(); ++i) {
+			if (!event_pending[i]) {
+				continue;
 			}
 
-			//add the period of the event to the trigger time
-			EQTime::AddMinutes(e.period, &e.next);
-			ran = true;
+			if (
+				next_index == spawn_events.size() ||
+				EQTime::IsTimeBefore(&spawn_events[next_index].next, &spawn_events[i].next)
+			) {
+				next_index = i;
+			}
 		}
 
-		//only write it out if the event actually ran
-		if (ran) {
-			UpdateSpawnEvent(e);
+		if (next_index == spawn_events.size()) {
+			break;
 		}
+
+		auto& e = spawn_events[next_index];
+
+		LogSpawns("Catch up triggering on event [{}]", e.id);
+		//this event has been triggered.
+		//execute the event
+		if (!e.strict || event_is_strict[next_index]) {
+			ExecEvent(e, false);
+		}
+
+		//add the period of the event to the trigger time
+		EQTime::AddMinutes(e.period, &e.next);
+		event_ran[next_index]     = true;
+		event_pending[next_index] = EQTime::IsTimeBefore(&tod, &e.next);
+	}
+
+	//only write out the events that actually ran
+	for (size_t i = 0; i < spawn_events.size(); ++i) {
+		if (event_ran[i]) {
+			UpdateSpawnEvent(spawn_events[i]);
+		}
+	}
+
+	// AKK-STACK FIX (day/night boot): derive, don't inherit.
+	//
+	// The replay above only fires events whose stored `next` has already passed, so a zone
+	// that boots BETWEEN transitions replays nothing and simply keeps whatever
+	// `spawn_condition_values` happens to hold -- which is the value from some earlier boot,
+	// possibly a wrong one, and re-persisting it makes it self-reinforcing. gfaydark booted
+	// at 22:34 with a stale row and stayed on "night off" even though its own schedule turns
+	// night on at 18:00.
+	//
+	// So for any condition whose enabled events are ALL plain ActionSet rows, ignore the
+	// stored value and compute the answer from the schedule itself: each event's most recent
+	// firing at or before now is its `next` walked back by whole periods, and the latest such
+	// firing across the condition's events decides the value. Conditions that accumulate
+	// (Add/Subtract/Multiply/Divide) depend on their own history and conditions with strict
+	// events depend on having been up at the right moment, so those keep the replay result;
+	// so does any condition with no enabled events, which is quest-driven.
+
+	auto to_eq_minutes = [](const TimeOfDay_Struct& t) -> int64 {
+		return ((((static_cast<int64>(t.year) * 12 + (t.month - 1)) * 28 + (t.day - 1)) * 24 +
+			(t.hour - 1)) * 60) + t.minute;
+	};
+
+	const int64 now_eq_minutes = to_eq_minutes(tod);
+
+	std::map<uint16, bool>  condition_is_derivable;
+	std::map<uint16, int64> condition_latest_firing;
+	std::map<uint16, int16> condition_derived_value;
+
+	for (const auto& e : spawn_events) {
+		if (!e.enabled) {
+			continue;
+		}
+
+		if (condition_is_derivable.find(e.condition_id) == condition_is_derivable.end()) {
+			condition_is_derivable[e.condition_id] = true;
+		}
+
+		if (e.action != SpawnEvent::ActionSet || e.strict || !e.period) {
+			condition_is_derivable[e.condition_id] = false;
+			continue;
+		}
+
+		//walk `next` back by whole periods to the most recent firing at or before now
+		const int64 next_eq_minutes = to_eq_minutes(e.next);
+		const int64 elapsed         = now_eq_minutes - next_eq_minutes;
+
+		int64 periods = elapsed / static_cast<int64>(e.period);
+		if (elapsed < 0 && (elapsed % static_cast<int64>(e.period)) != 0) {
+			periods -= 1;    //C++ truncates toward zero; we need floor
+		}
+
+		const int64 latest_firing = next_eq_minutes + periods * static_cast<int64>(e.period);
+
+		auto latest = condition_latest_firing.find(e.condition_id);
+		if (latest == condition_latest_firing.end() || latest_firing > latest->second) {
+			condition_latest_firing[e.condition_id]  = latest_firing;
+			condition_derived_value[e.condition_id]  = e.argument;
+		}
+	}
+
+	for (const auto& d : condition_derived_value) {
+		if (!condition_is_derivable[d.first]) {
+			continue;
+		}
+
+		auto c = spawn_conditions.find(d.first);
+		if (c == spawn_conditions.end()) {
+			continue;
+		}
+
+		c->second.value = d.second;
+	}
+
+	// AKK-STACK FIX (day/night boot): persist whatever the catch-up landed on.
+	//
+	// ExecEvent(e, false) is the "minor update done while loading" path -- it moves the
+	// value in memory and never touches `spawn_condition_values`. That row is what the
+	// NEXT boot starts from, so leaving it stale meant a zone that booted outside a
+	// transition window (no event due, nothing to replay) inherited the value from
+	// whenever it was last written, quietly reintroducing the very bug the replay just
+	// fixed. Written directly rather than through SetCondition, which would early-return
+	// here: the in-memory value is already the new one.
+	for (const auto& c : spawn_conditions) {
+		const auto before = condition_value_before.find(c.first);
+
+		//skip ids that were not in the `spawn_conditions` table -- an event referencing a
+		//missing condition gets one materialised by the reset above, and persisting that
+		//would leave an orphan row behind
+		if (before != condition_value_before.end() && before->second != c.second.value) {
+			UpdateSpawnCondition(zone->GetShortName(), zone->GetInstanceID(), c.first, c.second.value);
+		}
+	}
+
+	if (!spawn_conditions.empty()) {
+		std::vector<std::string> resolved;
+		resolved.reserve(spawn_conditions.size());
+
+		for (const auto& c : spawn_conditions) {
+			resolved.emplace_back(fmt::format("[{}] = [{}]", c.first, c.second.value));
+		}
+
+		LogInfo(
+			"Resolved [{}] spawn condition(s) at [{}:{:02}] | {}",
+			resolved.size(),
+			tod.hour - 1,
+			tod.minute,
+			Strings::Join(resolved, ", ")
+		);
 	}
 
 	//now our event timers are all up to date, find our closest event.
