@@ -8246,6 +8246,24 @@ FACTION_VALUE Client::GetFactionLevel(uint32 char_id, uint32 npc_id, uint32 p_ra
 	return fac;
 }
 
+// Flattens a faction hit to the shape configured by the Faction:NormalizeHits rules:
+// every loss is worth exactly Faction:NormalizedNegativeHit and every gain is worth at
+// least Faction:NormalizedPositiveMinimum, whatever the content actually asked for.
+// Applied to the value itself rather than to the content tables so the stock PEQ numbers
+// stay intact in the database and the rule can be turned off again.
+int32 Client::NormalizeFactionHit(int32 value)
+{
+	if (value == 0 || !RuleB(Faction, NormalizeHits)) {
+		return value;
+	}
+
+	if (value < 0) {
+		return RuleI(Faction, NormalizedNegativeHit);
+	}
+
+	return std::max(value, RuleI(Faction, NormalizedPositiveMinimum));
+}
+
 //Sets the characters faction standing with the specified NPC.
 void Client::SetFactionLevel(
 	uint32 character_id,
@@ -8284,6 +8302,8 @@ void Client::SetFactionLevel(
 				e.value = std::abs(e.value);
 			}
 		}
+
+		e.value = NormalizeFactionHit(e.value);
 
 		// Adjust the amount you can go up or down so the resulting range
 		// is PERSONAL_MAX - PERSONAL_MIN
@@ -8335,6 +8355,8 @@ void Client::SetFactionLevel(
 void Client::SetFactionLevel2(uint32 char_id, int32 faction_id, uint8 char_class, uint8 char_race, uint8 char_deity, int32 value, uint8 temp)
 {
 	int32 current_value;
+
+	value = NormalizeFactionHit(value);
 
 	//Get the npc faction list
 	if(faction_id > 0 && value != 0) {
@@ -8419,6 +8441,10 @@ void Client::UpdatePersonalFaction(int32 char_id, int32 npc_value, int32 faction
 				npc_value *= 2;
 		}
 	}
+
+	// HeroicCHA can push a normalized hit back off shape (it deepens losses and can
+	// double a truncated one), so re-assert the rule on the value that actually lands.
+	npc_value = NormalizeFactionHit(npc_value);
 
 	// Set flag when to update db
 	// Repair needed, as db changes could modify a base value for a faction

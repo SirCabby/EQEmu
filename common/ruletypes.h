@@ -1072,6 +1072,9 @@ RULE_INT(Faction, IndifferentlyFactionMinimum, 0, "Minimum faction for indiffere
 RULE_INT(Faction, ApprehensivelyFactionMinimum, -100, "Minimum faction for apprehensively")
 RULE_INT(Faction, DubiouslyFactionMinimum, -500, "Minimum faction for dubiously")
 RULE_INT(Faction, ThreateninglyFactionMinimum, -750, "Minimum faction for threateningly")
+RULE_BOOL(Faction, NormalizeHits, true, "Flatten every faction hit (kills, quests, tasks, associations) to NormalizedNegativeHit when negative and to at least NormalizedPositiveMinimum when positive")
+RULE_INT(Faction, NormalizedNegativeHit, -1, "Value every negative faction hit is flattened to while Faction:NormalizeHits is enabled")
+RULE_INT(Faction, NormalizedPositiveMinimum, 100, "Floor every positive faction hit is raised to while Faction:NormalizeHits is enabled")
 RULE_CATEGORY_END()
 
 RULE_CATEGORY(Analytics)
