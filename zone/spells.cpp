@@ -3912,8 +3912,13 @@ bool Mob::SpellOnTarget(
 		return false;
 	}
 
+	// Alliance line spells classify as detrimental (SAI_Calm + magic resist), but they are
+	// meant to be cast at the NPCs you cannot attack - merchants and guildmasters flagged
+	// HarmFromClientImmunity - so they are exempt from the attack check, as at the
+	// IsBeneficialAllowed check further down.
 	if (
 		IsDetrimentalSpell(spell_id) &&
+		!IsAllianceSpell(spell_id) &&
 		!IsAttackAllowed(spelltar, true) &&
 		!IsResurrectionEffects(spell_id) &&
 		!IsEffectInSpell(spell_id, SpellEffect::BindSight)
@@ -4261,6 +4266,7 @@ bool Mob::SpellOnTarget(
 				}
 			}
 		} else if (
+			!IsAllianceSpell(spell_id) &&
 			!IsAttackAllowed(spelltar, true) &&
 			!IsResurrectionEffects(spell_id) &&
 			!IsEffectInSpell(spell_id, SpellEffect::BindSight)
