@@ -623,14 +623,12 @@ void Object::HandleAutoCombine(Client* user, const RecipeAutoCombine_Struct* rac
 	if (spec.tradeskill == EQ::skills::SkillAlchemy) {
 		if (user->GetClass() != Class::Shaman) {
 			user->Message(Chat::Red, "This tradeskill can only be performed by a shaman.");
-			auto outapp = new EQApplicationPacket(OP_TradeSkillCombine, 0);
 			user->QueuePacket(outapp);
 			safe_delete(outapp);
 			return;
 		}
 		else if (user->GetLevel() < MIN_LEVEL_ALCHEMY) {
 			user->Message(Chat::Red, "You cannot perform alchemy until you reach level %i.", MIN_LEVEL_ALCHEMY);
-			auto outapp = new EQApplicationPacket(OP_TradeSkillCombine, 0);
 			user->QueuePacket(outapp);
 			safe_delete(outapp);
 			return;
@@ -639,7 +637,6 @@ void Object::HandleAutoCombine(Client* user, const RecipeAutoCombine_Struct* rac
 	else if (spec.tradeskill == EQ::skills::SkillTinkering) {
 		if (user->GetRace() != Race::Gnome) {
 			user->Message(Chat::Red, "Only gnomes can tinker.");
-			auto outapp = new EQApplicationPacket(OP_TradeSkillCombine, 0);
 			user->QueuePacket(outapp);
 			safe_delete(outapp);
 			return;
@@ -648,7 +645,6 @@ void Object::HandleAutoCombine(Client* user, const RecipeAutoCombine_Struct* rac
 	else if (spec.tradeskill == EQ::skills::SkillMakePoison) {
 		if (user->GetClass() != Class::Rogue) {
 			user->Message(Chat::Red, "Only rogues can mix poisons.");
-			auto outapp = new EQApplicationPacket(OP_TradeSkillCombine, 0);
 			user->QueuePacket(outapp);
 			safe_delete(outapp);
 			return;

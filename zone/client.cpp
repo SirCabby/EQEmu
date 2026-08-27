@@ -245,6 +245,7 @@ Client::Client() : Mob(
 	m_pp.autosplit = false;
 	// initialise haste variable
 	m_tradeskill_object = nullptr;
+	m_tradeskill_object_id = 0;
 	delaytimer = false;
 	PendingRezzXP = -1;
 	PendingRezzDBID = 0;
@@ -556,6 +557,7 @@ Client::Client(EQStreamInterface *ieqs) : Mob(
 	m_pp.autosplit = false;
 	// initialise haste variable
 	m_tradeskill_object = nullptr;
+	m_tradeskill_object_id = 0;
 	delaytimer = false;
 	PendingRezzXP = -1;
 	PendingRezzDBID = 0;
@@ -816,6 +818,56 @@ Client::~Client() {
 	}
 
 	UninitializeBuffSlots();
+}
+
+void Client::SetTradeskillObject(Object* object)
+{
+	m_tradeskill_object = object;
+
+	// Remember which container this was even after the binding is dropped. The RoF2 client
+	// sends the same zero-length OP_ClickObjectAction when it closes a world container and
+	// when it switches between the auto-combine and experiment windows, so a cleared binding
+	// is not proof the window is gone -- ReacquireTradeskillObject() re-binds if the client
+	// keeps operating the container.
+	if (object) {
+		m_tradeskill_object_id = object->GetID();
+	}
+}
+
+// Recover the world tradeskill container binding that Object::Close() dropped out from
+// under a client that is still using the container.
+//
+// Without this, every drag in or out of the container misses Step 3 of Client::SwapItem(),
+// fails, and trips SwapItemResync() ("Inventory Desyncronization detected: Resending slot
+// data..."), and Combine reports that the server does not know about the container -- until
+// the player closes and reopens it by hand.
+Object* Client::ReacquireTradeskillObject()
+{
+	if (m_tradeskill_object) {
+		return m_tradeskill_object;
+	}
+
+	if (!m_tradeskill_object_id) {
+		return nullptr;
+	}
+
+	auto* entity = entity_list.GetID(m_tradeskill_object_id);
+	if (!entity || !entity->IsObject()) {
+		m_tradeskill_object_id = 0;
+		return nullptr;
+	}
+
+	if (!entity->CastToObject()->ReacquireUser(this)) {
+		return nullptr;
+	}
+
+	LogTradeskills(
+		"Re-bound world container entity [{}] to [{}]; the client was still using it",
+		m_tradeskill_object_id,
+		GetName()
+	);
+
+	return m_tradeskill_object;
 }
 
 void Client::SendZoneInPackets()

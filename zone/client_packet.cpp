@@ -3533,7 +3533,9 @@ void Client::Handle_OP_AugmentItem(const EQApplicationPacket *app)
 		safe_delete(item_one_to_push);
 		safe_delete(item_two_to_push);
 	} else {
-		Object::HandleAugmentation(this, in_augment, m_tradeskill_object); // Delegate to tradeskill object to perform combine
+		// same lost-binding recovery as OP_TradeSkillCombine
+		Object* worldo = m_tradeskill_object ? m_tradeskill_object : ReacquireTradeskillObject();
+		Object::HandleAugmentation(this, in_augment, worldo); // Delegate to tradeskill object to perform combine
 	}
 
 	return;
@@ -4802,8 +4804,18 @@ void Client::Handle_OP_ClickObjectAction(const EQApplicationPacket *app)
 		QueuePacket(&end_trade2);
 
 		// RoF sends a 0 sized packet for closing objects
-		if (GetTradeskillObject() && ClientVersion() >= EQ::versions::ClientVersion::RoF)
+		if (GetTradeskillObject() && ClientVersion() >= EQ::versions::ClientVersion::RoF) {
+			// This packet means both "closed the container" and "switched windows", so the close
+			// below may be spurious -- Client::ReacquireTradeskillObject() re-binds if the client
+			// keeps using the container. Log it so a spurious one is visible.
+			LogTradeskills(
+				"Zero-length OP_ClickObjectAction from [{}]; closing world container entity [{}]",
+				GetName(),
+				GetTradeskillObject()->GetID()
+			);
+
 			GetTradeskillObject()->CastToObject()->Close();
+		}
 
 		return;
 	}
@@ -16530,7 +16542,16 @@ void Client::Handle_OP_TradeSkillCombine(const EQApplicationPacket *app)
 
 	// Delegate to tradeskill object to perform combine
 	NewCombine_Struct* in_combine = (NewCombine_Struct*)app->pBuffer;
-	Object::HandleCombine(this, in_combine, m_tradeskill_object);
+
+	// The client can still be driving a world container after Object::Close() dropped the
+	// server-side binding (see Client::ReacquireTradeskillObject), which would otherwise
+	// fail here with "Server is not aware of the tradeskill container".
+	Object* worldo = m_tradeskill_object;
+	if (!worldo && in_combine->container_slot == EQ::invslot::SLOT_TRADESKILL_EXPERIMENT_COMBINE) {
+		worldo = ReacquireTradeskillObject();
+	}
+
+	Object::HandleCombine(this, in_combine, worldo);
 	return;
 }
 

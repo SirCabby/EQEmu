@@ -461,6 +461,38 @@ void Object::Close() {
 	user = nullptr;
 }
 
+// Hand this container back to a client that never actually stopped using it.
+//
+// The RoF2 client sends a zero-length OP_ClickObjectAction both when it closes a world
+// container and when it merely switches between the auto-combine and experiment windows
+// (see Client::Handle_OP_ClickObjectAction), and the two are indistinguishable on the
+// wire -- so Close() runs while the container window is still open on the client. Only
+// re-bind when the client proves it is still using the container by operating on it.
+bool Object::ReacquireUser(Client* c)
+{
+	// somebody else got here first, or this was never a tradeskill container
+	if (!c || user || m_ground_spawn) {
+		return false;
+	}
+
+	if (last_user != c) {
+		return false;
+	}
+
+	if (!m_inst || !m_inst->IsType(EQ::item::ItemClassBag)) {
+		return false;
+	}
+
+	if (DistanceSquared(c->GetPosition(), glm::vec4(m_data.x, m_data.y, m_data.z, 0.0f)) > USE_NPC_RANGE2) {
+		return false;
+	}
+
+	user = c;
+	c->SetTradeskillObject(this);
+
+	return true;
+}
+
 // Remove item from container
 void Object::DeleteItem(uint8 index)
 {

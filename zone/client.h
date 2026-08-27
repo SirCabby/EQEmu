@@ -1054,8 +1054,9 @@ public:
 
 	void Disarm(Client* disarmer, int chance);
 	bool BindWound(Mob* bindmob, bool start, bool fail = false);
-	void SetTradeskillObject(Object* object) { m_tradeskill_object = object; }
+	void SetTradeskillObject(Object* object);
 	Object* GetTradeskillObject() { return m_tradeskill_object; }
+	Object* ReacquireTradeskillObject();
 	void SendTributes();
 	void SendGuildTributes();
 	void DoTributeUpdate();
@@ -2175,6 +2176,7 @@ private:
 	ExtendedProfile_Struct m_epp;
 	EQ::InventoryProfile m_inv;
 	Object* m_tradeskill_object;
+	uint16 m_tradeskill_object_id; // last world container this client opened, for re-binding
 	PetInfo m_petinfo; // current pet data, used while loading from and saving to DB
 	PetInfo m_suspendedminion; // pet data for our suspended minion.
 	MercInfo m_mercinfo[MAXMERCS]; // current mercenary

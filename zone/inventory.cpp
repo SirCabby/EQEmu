@@ -2010,6 +2010,17 @@ bool Client::SwapItem(MoveItem_Struct* move_in) {
 	}
 
 	// Step 3: Check for interaction with World Container (tradeskills)
+
+	// A world slot in this move means the client still has the container open, so recover the
+	// binding if Object::Close() dropped it (see Client::ReacquireTradeskillObject). Without
+	// this the move falls through to the generic swap below, fails on a slot that was never in
+	// m_inv, and the caller resyncs with "Inventory Desyncronization detected".
+	if (m_tradeskill_object == nullptr &&
+		(EQ::ValueWithin(src_slot_id, EQ::invslot::WORLD_BEGIN, EQ::invslot::WORLD_END) ||
+		 EQ::ValueWithin(dst_slot_id, EQ::invslot::WORLD_BEGIN, EQ::invslot::WORLD_END))) {
+		ReacquireTradeskillObject();
+	}
+
 	if(m_tradeskill_object != nullptr) {
 		if (src_slot_id >= EQ::invslot::WORLD_BEGIN && src_slot_id <= EQ::invslot::WORLD_END) {
 			// Picking up item from world container
