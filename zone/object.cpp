@@ -493,6 +493,51 @@ bool Object::ReacquireUser(Client* c)
 	return true;
 }
 
+// Redescribe this container to the client from scratch: wipe its view and resend whatever we
+// actually hold, mirroring the open sequence in HandleClick().
+//
+// A world container lives in Object::m_inst, not in the client's InventoryProfile, so
+// Client::SwapItemResync() cannot describe it slot by slot -- a rejected move to or from a
+// world slot used to leave a phantom item sitting in the container window with no way to
+// clear it short of closing and reopening the container by hand.
+void Object::ResyncContainerContents(Client* c)
+{
+	if (!c || !m_inst || !m_inst->IsType(EQ::item::ItemClassBag)) {
+		return;
+	}
+
+	auto outapp = new EQApplicationPacket(OP_ClearObject, sizeof(ClearObject_Struct));
+	ClearObject_Struct *cos = (ClearObject_Struct *)outapp->pBuffer;
+	cos->Clear = 1;
+	c->QueuePacket(outapp);
+	safe_delete(outapp);
+
+	// Nothing left to describe: OP_ClearObject on its own is exactly what Close() sends, so stop
+	// here rather than replaying the rest of the open handshake for an empty container.
+	bool has_contents = false;
+	for (uint8 i = EQ::invbag::SLOT_BEGIN; i <= EQ::invbag::SLOT_END; i++) {
+		if (m_inst->GetItem(i)) {
+			has_contents = true;
+			break;
+		}
+	}
+
+	if (!has_contents) {
+		return;
+	}
+
+	auto ready = new EQApplicationPacket(OP_ClientReady, 0);
+	c->QueuePacket(ready);
+	safe_delete(ready);
+
+	for (uint8 i = EQ::invbag::SLOT_BEGIN; i <= EQ::invbag::SLOT_END; i++) {
+		auto inst = m_inst->GetItem(i);
+		if (inst) {
+			c->SendItemPacket(i, inst, ItemPacketWorldContainer);
+		}
+	}
+}
+
 // Remove item from container
 void Object::DeleteItem(uint8 index)
 {

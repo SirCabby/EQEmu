@@ -406,6 +406,15 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 			user->Message(Chat::Emote, "You must remove augments from all component items before you can attempt this combine.");
 		}
 
+		// Rapid combining races the OP_ClearObject we send after a combine against the moves the
+		// client has already staged for the next one, so the two sides can end up disagreeing about
+		// what is in the container -- and the player then gets "you cannot combine these items" over
+		// a container that looks correct to them. Redescribe it so one more click is enough to
+		// recover, instead of having to close and reopen the container.
+		if (worldcontainer && worldo) {
+			worldo->ResyncContainerContents(user);
+		}
+
 		auto outapp = new EQApplicationPacket(OP_TradeSkillCombine, 0);
 		user->QueuePacket(outapp);
 		safe_delete(outapp);

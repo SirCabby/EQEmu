@@ -2357,7 +2357,51 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 	// resync the 'from' and 'to' slots on an as-needed basis
 	// Not as effective as the full process, but less intrusive to gameplay
 	LogInventory("Inventory desyncronization. (charname: [{}], source: [{}], destination: [{}])", GetName(), move_slots->from_slot, move_slots->to_slot);
+
+	// A desync is a real server-detected inconsistency and we already shout about it in chat, so
+	// record enough to identify which SwapItem() branch rejected the move without needing the
+	// Inventory log category switched on after the fact.
+	{
+		const EQ::ItemInstance *src = m_inv.GetItem((int16) move_slots->from_slot);
+		const EQ::ItemInstance *dst = m_inv.GetItem((int16) move_slots->to_slot);
+
+		LogError(
+			"Inventory desync for [{}]: from_slot [{}] to_slot [{}] stack [{}] | server src [{}] charges [{}] | "
+			"server dst [{}] charges [{}] | tradeskill object [{}]",
+			GetName(),
+			move_slots->from_slot,
+			move_slots->to_slot,
+			move_slots->number_in_stack,
+			src ? src->GetID() : 0,
+			src ? src->GetCharges() : 0,
+			dst ? dst->GetID() : 0,
+			dst ? dst->GetCharges() : 0,
+			m_tradeskill_object ? "bound" : "none"
+		);
+	}
+
 	Message(Chat::Yellow, "Inventory Desyncronization detected: Resending slot data...");
+
+	// A world tradeskill container lives in Object::m_inst, not in m_inv, so the per-slot resync
+	// below cannot describe it -- it falls through to "Could not resyncronize slot 4000" and
+	// leaves whatever the client thinks it put in the forge sitting there as a phantom. That is
+	// what forces the player to close and reopen the container before they can combine again.
+	// Redescribe the whole container instead.
+	const bool from_world = (move_slots->from_slot >= (uint32) EQ::invslot::WORLD_BEGIN &&
+	                         move_slots->from_slot <= (uint32) EQ::invslot::WORLD_END);
+	const bool to_world   = (move_slots->to_slot   >= (uint32) EQ::invslot::WORLD_BEGIN &&
+	                         move_slots->to_slot   <= (uint32) EQ::invslot::WORLD_END);
+
+	if (from_world || to_world) {
+		Object* worldo = m_tradeskill_object ? m_tradeskill_object : ReacquireTradeskillObject();
+		if (worldo) {
+			worldo->ResyncContainerContents(this);
+			Message(Chat::Lime, "Tradeskill container resyncronized.");
+		}
+		else {
+			Message(Chat::Red, "Could not resyncronize the tradeskill container.");
+		}
+	}
 
 	if (move_slots->from_slot >= EQ::invslot::EQUIPMENT_BEGIN && move_slots->from_slot <= EQ::invbag::CURSOR_BAG_END) {
 		int16 resync_slot = (EQ::InventoryProfile::CalcSlotId(move_slots->from_slot) == INVALID_INDEX) ? move_slots->from_slot : EQ::InventoryProfile::CalcSlotId(move_slots->from_slot);
@@ -2384,7 +2428,7 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 		}
 		else { Message(Chat::Red, "Could not resyncronize source slot %i.", move_slots->from_slot); }
 	}
-	else {
+	else if (!from_world) {
 		int16 resync_slot = (EQ::InventoryProfile::CalcSlotId(move_slots->from_slot) == INVALID_INDEX) ? move_slots->from_slot : EQ::InventoryProfile::CalcSlotId(move_slots->from_slot);
 		if (IsValidSlot(resync_slot) && resync_slot != INVALID_INDEX) {
 			if(m_inv[resync_slot]) {
@@ -2426,7 +2470,7 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 		}
 		else { Message(Chat::Red, "Could not resyncronize destination slot %i.", move_slots->to_slot); }
 	}
-	else {
+	else if (!to_world) {
 		int16 resync_slot = (EQ::InventoryProfile::CalcSlotId(move_slots->to_slot) == INVALID_INDEX) ? move_slots->to_slot : EQ::InventoryProfile::CalcSlotId(move_slots->to_slot);
 		if (IsValidSlot(resync_slot) && resync_slot != INVALID_INDEX) {
 			if(m_inv[resync_slot]) {
