@@ -507,36 +507,30 @@ void Object::ResyncContainerContents(Client* c)
 		return;
 	}
 
+	// ONLY ever send the wipe, and only when we are actually empty.
+	//
+	// Resending contents here corrupted inventories: SendItemPacket(i, inst,
+	// ItemPacketWorldContainer) numbers world container slots 0-9, and the client only reads
+	// those as container slots inside the open handshake that HandleClick() performs. Sent
+	// outside it the client applied them to possessions slots 0-9 instead -- charm, ear, head,
+	// face, ear, neck, shoulders, arms -- and the moves it then made against that false view
+	// destroyed real equipment. Never send world container item packets outside HandleClick().
+	//
+	// The wipe on its own is safe: it is exactly what Close() sends. Restricting it to an empty
+	// container is what keeps it correct, because the case this exists for is a clear that
+	// reaches the client after it staged the next batch. If we are holding those items the
+	// client put there, its view already matches and there is nothing to say.
+	for (uint8 i = EQ::invbag::SLOT_BEGIN; i <= EQ::invbag::SLOT_END; i++) {
+		if (m_inst->GetItem(i)) {
+			return;
+		}
+	}
+
 	auto outapp = new EQApplicationPacket(OP_ClearObject, sizeof(ClearObject_Struct));
 	ClearObject_Struct *cos = (ClearObject_Struct *)outapp->pBuffer;
 	cos->Clear = 1;
 	c->QueuePacket(outapp);
 	safe_delete(outapp);
-
-	// Nothing left to describe: OP_ClearObject on its own is exactly what Close() sends, so stop
-	// here rather than replaying the rest of the open handshake for an empty container.
-	bool has_contents = false;
-	for (uint8 i = EQ::invbag::SLOT_BEGIN; i <= EQ::invbag::SLOT_END; i++) {
-		if (m_inst->GetItem(i)) {
-			has_contents = true;
-			break;
-		}
-	}
-
-	if (!has_contents) {
-		return;
-	}
-
-	auto ready = new EQApplicationPacket(OP_ClientReady, 0);
-	c->QueuePacket(ready);
-	safe_delete(ready);
-
-	for (uint8 i = EQ::invbag::SLOT_BEGIN; i <= EQ::invbag::SLOT_END; i++) {
-		auto inst = m_inst->GetItem(i);
-		if (inst) {
-			c->SendItemPacket(i, inst, ItemPacketWorldContainer);
-		}
-	}
 }
 
 // Remove item from container
