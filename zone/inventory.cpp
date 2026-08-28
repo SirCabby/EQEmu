@@ -735,8 +735,24 @@ bool Client::SummonItem(uint32 item_id, int16 charges, uint32 aug1, uint32 aug2,
 
 	// put item into inventory
 	if (to_slot == EQ::invslot::slotCursor) {
+		// Only describe the cursor to a RoF+ client when it was EMPTY. This is the same rule
+		// PutLootInInventory() has always followed: a second item packet does not queue behind the
+		// first on the client, it overwrites what the client is showing, while our queue still
+		// starts with the original. The two then disagree about what "the cursor item" is.
+		//
+		// Seen live: a successful Holy Cake pushes a Cake Round and then 6 Holy Cakes. The client
+		// kept only the Holy Cakes, banked those, and read its cursor as empty -- while the server
+		// had popped the Cake Round and still held the Holy Cakes. The next drop therefore put the
+		// product into the oven, which no recipe matches ("You cannot combine these items in this
+		// container type!"). SendCursorBuffer() is what the client is meant to learn the rest from,
+		// and the same capture shows it working: "revealing front [9733] to client".
+		const bool cursor_was_empty = m_inv.CursorEmpty();
+
 		PushItemOnCursor(*inst);
-		SendItemPacket(EQ::invslot::slotCursor, inst, ItemPacketLimbo);
+
+		if (cursor_was_empty || ClientVersion() < EQ::versions::ClientVersion::RoF) {
+			SendItemPacket(EQ::invslot::slotCursor, inst, ItemPacketLimbo);
+		}
 	} else {
 		PutItemInInventory(to_slot, *inst, true);
 	}
