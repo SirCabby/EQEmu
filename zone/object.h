@@ -150,6 +150,12 @@ public:
 	void Close();
 	bool ReacquireUser(Client* c);
 	void ResyncContainerContents(Client* c);
+
+	// Queue an authoritative redescription of this container for the end of the tick rather than
+	// sending one now. Object::Process() runs once per main-loop pass and before client packets
+	// are handled, so the flush always describes state that every move received this pass has
+	// already been applied to -- which a packet sent mid-combine cannot do.
+	void MarkClientResyncNeeded() { m_client_resync_pending = true; }
 	void Delete(bool reset_state=false); // Object itself
 	static void HandleCombine(Client* user, const NewCombine_Struct* in_combine, Object *worldo);
 	static void HandleAugmentation(Client* user, const AugmentItem_Struct* in_augment, Object *worldo);
@@ -236,6 +242,7 @@ protected:
 	float  m_min_x;
 	float  m_min_y;
 	bool   m_ground_spawn;
+	bool   m_client_resync_pending = false;
 	char   m_display_name[64];
 	bool   m_fix_z;
 protected:

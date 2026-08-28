@@ -2358,9 +2358,9 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 	// Not as effective as the full process, but less intrusive to gameplay
 	LogInventory("Inventory desyncronization. (charname: [{}], source: [{}], destination: [{}])", GetName(), move_slots->from_slot, move_slots->to_slot);
 
-	// A desync is a real server-detected inconsistency and we already shout about it in chat, so
-	// record enough to identify which SwapItem() branch rejected the move without needing the
-	// Inventory log category switched on after the fact.
+	// A desync is a real server-detected inconsistency, and the tradeskill path below deliberately
+	// says nothing in chat, so this is the only account of it. Record enough to identify which
+	// SwapItem() branch rejected the move without the Inventory log category switched on first.
 	{
 		const EQ::ItemInstance *src = m_inv.GetItem((int16) move_slots->from_slot);
 		const EQ::ItemInstance *dst = m_inv.GetItem((int16) move_slots->to_slot);
@@ -2380,26 +2380,29 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 		);
 	}
 
-	Message(Chat::Yellow, "Inventory Desyncronization detected: Resending slot data...");
-
 	// A world tradeskill container lives in Object::m_inst, not in m_inv, so the per-slot resync
 	// below cannot describe it -- it falls through to "Could not resyncronize slot 4000" and
-	// leaves whatever the client thinks it put in the forge sitting there as a phantom. That is
-	// what forces the player to close and reopen the container before they can combine again.
-	// Redescribe the whole container instead.
+	// leaves whatever the client thinks it put in the forge sitting there as a phantom.
 	const bool from_world = (move_slots->from_slot >= (uint32) EQ::invslot::WORLD_BEGIN &&
 	                         move_slots->from_slot <= (uint32) EQ::invslot::WORLD_END);
 	const bool to_world   = (move_slots->to_slot   >= (uint32) EQ::invslot::WORLD_BEGIN &&
 	                         move_slots->to_slot   <= (uint32) EQ::invslot::WORLD_END);
 
-	if (from_world || to_world) {
+	// Combining under a script trips this routinely and the server puts it right on its own, so
+	// it is not worth interrupting the player about -- and the chat spam is what made the
+	// condition look worse than it is. Reconcile silently; the error log above has the detail.
+	const bool quiet = from_world || to_world;
+
+	if (!quiet) {
+		Message(Chat::Yellow, "Inventory Desyncronization detected: Resending slot data...");
+	}
+	else {
 		Object* worldo = m_tradeskill_object ? m_tradeskill_object : ReacquireTradeskillObject();
 		if (worldo) {
-			worldo->ResyncContainerContents(this);
-			Message(Chat::Lime, "Tradeskill container resyncronized.");
+			worldo->MarkClientResyncNeeded();
 		}
 		else {
-			Message(Chat::Red, "Could not resyncronize the tradeskill container.");
+			Message(Chat::Red, "Could not resyncronize the tradeskill container - close and reopen it.");
 		}
 	}
 
@@ -2424,9 +2427,9 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 				safe_delete(outapp);
 			}
 			safe_delete(token_inst);
-			Message(Chat::Lime, "Source slot %i resyncronized.", move_slots->from_slot);
+			if (!quiet) { Message(Chat::Lime, "Source slot %i resyncronized.", move_slots->from_slot); }
 		}
-		else { Message(Chat::Red, "Could not resyncronize source slot %i.", move_slots->from_slot); }
+		else if (!quiet) { Message(Chat::Red, "Could not resyncronize source slot %i.", move_slots->from_slot); }
 	}
 	else if (!from_world) {
 		int16 resync_slot = (EQ::InventoryProfile::CalcSlotId(move_slots->from_slot) == INVALID_INDEX) ? move_slots->from_slot : EQ::InventoryProfile::CalcSlotId(move_slots->from_slot);
@@ -2439,11 +2442,11 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 				SendItemPacket(resync_slot, m_inv[resync_slot], ItemPacketTrade);
 
 				safe_delete(token_inst);
-				Message(Chat::Lime, "Source slot %i resyncronized.", move_slots->from_slot);
+				if (!quiet) { Message(Chat::Lime, "Source slot %i resyncronized.", move_slots->from_slot); }
 			}
-			else { Message(Chat::Red, "Could not resyncronize source slot %i.", move_slots->from_slot); }
+			else if (!quiet) { Message(Chat::Red, "Could not resyncronize source slot %i.", move_slots->from_slot); }
 		}
-		else { Message(Chat::Red, "Could not resyncronize source slot %i.", move_slots->from_slot); }
+		else if (!quiet) { Message(Chat::Red, "Could not resyncronize source slot %i.", move_slots->from_slot); }
 	}
 
 	if (move_slots->to_slot >= EQ::invslot::EQUIPMENT_BEGIN && move_slots->to_slot <= EQ::invbag::CURSOR_BAG_END) {
@@ -2466,9 +2469,9 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 				safe_delete(outapp);
 			}
 			safe_delete(token_inst);
-			Message(Chat::Lime, "Destination slot %i resyncronized.", move_slots->to_slot);
+			if (!quiet) { Message(Chat::Lime, "Destination slot %i resyncronized.", move_slots->to_slot); }
 		}
-		else { Message(Chat::Red, "Could not resyncronize destination slot %i.", move_slots->to_slot); }
+		else if (!quiet) { Message(Chat::Red, "Could not resyncronize destination slot %i.", move_slots->to_slot); }
 	}
 	else if (!to_world) {
 		int16 resync_slot = (EQ::InventoryProfile::CalcSlotId(move_slots->to_slot) == INVALID_INDEX) ? move_slots->to_slot : EQ::InventoryProfile::CalcSlotId(move_slots->to_slot);
@@ -2481,11 +2484,11 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 				SendItemPacket(resync_slot, m_inv[resync_slot], ItemPacketTrade);
 
 				safe_delete(token_inst);
-				Message(Chat::Lime, "Destination slot %i resyncronized.", move_slots->to_slot);
+				if (!quiet) { Message(Chat::Lime, "Destination slot %i resyncronized.", move_slots->to_slot); }
 			}
-			else { Message(Chat::Red, "Could not resyncronize destination slot %i.", move_slots->to_slot); }
+			else if (!quiet) { Message(Chat::Red, "Could not resyncronize destination slot %i.", move_slots->to_slot); }
 		}
-		else { Message(Chat::Red, "Could not resyncronize destination slot %i.", move_slots->to_slot); }
+		else if (!quiet) { Message(Chat::Red, "Could not resyncronize destination slot %i.", move_slots->to_slot); }
 	}
 }
 

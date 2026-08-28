@@ -412,7 +412,7 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 		// a container that looks correct to them. Redescribe it so one more click is enough to
 		// recover, instead of having to close and reopen the container.
 		if (worldcontainer && worldo) {
-			worldo->ResyncContainerContents(user);
+			worldo->MarkClientResyncNeeded();
 		}
 
 		auto outapp = new EQApplicationPacket(OP_TradeSkillCombine, 0);
@@ -517,11 +517,15 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 	//now clean out the containers.
 	if(worldcontainer){
 		container->Clear();
-		outapp = new EQApplicationPacket(OP_ClearObject, sizeof(ClearObject_Struct));
-		ClearObject_Struct *cos = (ClearObject_Struct *)outapp->pBuffer;
-		cos->Clear = 1;
-		user->QueuePacket(outapp);
-		safe_delete(outapp);
+
+		// Do NOT wipe the client's view of the container from here. A script combining several
+		// times a second has already sent the moves for the next batch by the time this lands, and
+		// a bare OP_ClearObject erases them on the client while the server keeps them -- that is
+		// how a component ends up in neither the inventory nor the container until the player
+		// closes the oven. Queue an authoritative redescription for the end of the pass instead,
+		// once every move we are going to receive for this batch has been applied.
+		worldo->MarkClientResyncNeeded();
+
 		database.DeleteWorldContainer(worldo->m_id, zone->GetZoneID());
 	} else{
 		for (uint8 i = EQ::invbag::SLOT_BEGIN; i < EQ::invtype::WORLD_SIZE; i++) {

@@ -458,6 +458,7 @@ void Object::Close() {
 		user->SetTradeskillObject(nullptr);
 	}
 
+	m_client_resync_pending = false;
 	user = nullptr;
 }
 
@@ -617,6 +618,18 @@ bool Object::Process(){
 		user->SetTradeskillObject(nullptr);
 
 		user = nullptr;
+	}
+
+	// Flush any redescription queued during the previous pass. Doing it here rather than inline
+	// is the whole point: every item move the client sent in that pass has been applied by now,
+	// so what we send is the settled truth instead of a snapshot that a still-in-flight move is
+	// about to invalidate.
+	if (m_client_resync_pending) {
+		m_client_resync_pending = false;
+
+		if (user) {
+			ResyncContainerContents(user);
+		}
 	}
 
 	return true;
