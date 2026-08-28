@@ -1005,7 +1005,16 @@ void Client::SendCursorBuffer()
 	// Instead of dealing with client moving items in cursor buffer,
 	// we can just send the next item in the cursor buffer to the cursor.
 	if (ClientVersion() < EQ::versions::ClientVersion::RoF) { return; }
-	if (GetInv().CursorEmpty()) { return; }
+	if (GetInv().CursorEmpty()) {
+		LogInventory("CURSOR buffer: nothing queued, sending nothing");
+		return;
+	}
+
+	LogInventory(
+		"CURSOR buffer: revealing front [{}] to client, queue depth [{}]",
+		GetInv().GetCursorItem() ? GetInv().GetCursorItem()->GetID() : 0,
+		GetInv().CursorSize()
+	);
 
 	auto test_inst = GetInv().GetCursorItem();
 	if (test_inst == nullptr) { return; }
@@ -1124,6 +1133,13 @@ bool Client::PushItemOnCursor(const EQ::ItemInstance& inst, bool client_update)
 
 	EvolvingItemsManager::Instance()->DoLootChecks(CharacterID(), EQ::invslot::slotCursor, inst);
 	m_inv.PushCursor(inst);
+
+	LogInventory(
+		"CURSOR push: [{}] ([{}]) x[{}] -> queue depth now [{}], front is [{}], client_update [{}]",
+		inst.GetItem()->Name, inst.GetItem()->ID, inst.GetCharges(), m_inv.CursorSize(),
+		m_inv.GetCursorItem() ? m_inv.GetCursorItem()->GetID() : 0,
+		client_update ? "yes" : "no"
+	);
 
 	if (client_update) {
 		SendItemPacket(EQ::invslot::slotCursor, &inst, ItemPacketLimbo);
@@ -2025,6 +2041,10 @@ bool Client::SwapItem(MoveItem_Struct* move_in) {
 		if (src_slot_id >= EQ::invslot::WORLD_BEGIN && src_slot_id <= EQ::invslot::WORLD_END) {
 			// Picking up item from world container
 			EQ::ItemInstance* inst = m_tradeskill_object->PopItem(EQ::InventoryProfile::CalcBagIdx(src_slot_id));
+			LogInventory(
+				"CONTAINER out: world slot [{}] -> slot [{}] gave [{}]; cursor depth [{}]",
+				src_slot_id, dst_slot_id, inst ? inst->GetID() : 0, m_inv.CursorSize()
+			);
 			if (inst) {
 				PutItemInInventory(dst_slot_id, *inst, false);
 				safe_delete(inst);
@@ -2036,6 +2056,12 @@ bool Client::SwapItem(MoveItem_Struct* move_in) {
 			// Putting item into world container, which may swap (or pile onto) with existing item
 			uint8 world_idx = EQ::InventoryProfile::CalcBagIdx(dst_slot_id);
 			EQ::ItemInstance* world_inst = m_tradeskill_object->PopItem(world_idx);
+
+			LogInventory(
+				"CONTAINER in: slot [{}] (item [{}]) -> world slot [{}] which held [{}]; cursor depth [{}]",
+				src_slot_id, src_inst ? src_inst->GetID() : 0, dst_slot_id,
+				world_inst ? world_inst->GetID() : 0, m_inv.CursorSize()
+			);
 
 			// Case 1: No item in container, unidirectional "Put"
 			if (world_inst == nullptr) {

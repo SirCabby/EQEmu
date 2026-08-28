@@ -523,6 +523,11 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 		}
 		container->Clear();
 	}
+	LogTradeskills(
+		"COMBINE: [{}] recipe [{}] ([{}]) container cleared, cursor depth [{}]",
+		user->GetName(), spec.name, spec.recipe_id, user->GetInv().CursorSize()
+	);
+
 	//do the check and send results...
 	bool success = user->TradeskillExecute(&spec);
 
