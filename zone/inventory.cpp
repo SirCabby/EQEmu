@@ -746,13 +746,19 @@ bool Client::SummonItem(uint32 item_id, int16 charges, uint32 aug1, uint32 aug2,
 		// product into the oven, which no recipe matches ("You cannot combine these items in this
 		// container type!"). SendCursorBuffer() is what the client is meant to learn the rest from,
 		// and the same capture shows it working: "revealing front [9733] to client".
-		const bool cursor_was_empty = m_inv.CursorEmpty();
-
+		// EXPERIMENT (2026-08-27): announce EVERY push, which is stock upstream behaviour.
+		//
+		// The client keeps its own cursor queue -- pLocalPC->LimboBufferItems -- and
+		// SendCursorBuffer's comment calls revealing one at a time a "temporary work-around ...
+		// instead of dealing with client moving items in cursor buffer". If a second 0x6A really
+		// does land in that buffer, the client knows the whole queue the moment it is sent, its
+		// cursor reads are truthful with no round trip, and the settles in the macro can go.
+		//
+		// What to look for in the trace after a SUCCESSFUL combine (2 outputs): TWO consecutive
+		// cursor banks before the next pick-up. Two means the client queued them. One means it
+		// only ever tracks the front and the settles have to stay.
 		PushItemOnCursor(*inst);
-
-		if (cursor_was_empty || ClientVersion() < EQ::versions::ClientVersion::RoF) {
-			SendItemPacket(EQ::invslot::slotCursor, inst, ItemPacketLimbo);
-		}
+		SendItemPacket(EQ::invslot::slotCursor, inst, ItemPacketLimbo);
 	} else {
 		PutItemInInventory(to_slot, *inst, true);
 	}
