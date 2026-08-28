@@ -391,9 +391,19 @@ void Mob::SendWearChange(uint8 material_slot, Client *one_client)
 
 	w->wear_slot_id = material_slot;
 
-	if (GetRace() != m_last_wearchange_race_id) {
+	// AKK-STACK FIX: the dedupe cache below is keyed by the OBSERVER's entity id and holds the last
+	// appearance each of them was sent -- but it lives on this Mob, which outlives our own entity id.
+	// A same-zone respawn (Client::Death hands our id to the corpse, ClearHover() takes a fresh one
+	// and re-spawns us for the zone with an EMPTY equipment set, because the gear is on the corpse)
+	// leaves every observer rendering us naked while the cache still claims they have seen our armor.
+	// The first re-equip after looting the corpse then dedupes to nothing and they stay naked until
+	// the 10-minute cache timer -- or until we unequip (material 0 changes the key) and equip again,
+	// which is exactly the workaround players find. Drop the cache whenever our entity id moves, the
+	// same way a race change already does.
+	if (GetRace() != m_last_wearchange_race_id || GetID() != m_last_wearchange_spawn_id) {
 		m_last_seen_wearchange.clear();
-		m_last_wearchange_race_id = GetRace();
+		m_last_wearchange_race_id  = GetRace();
+		m_last_wearchange_spawn_id = GetID();
 	}
 
 	// this is a hash-like key to deduplicate packets sent to clients
