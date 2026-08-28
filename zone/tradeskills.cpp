@@ -264,9 +264,13 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 	}
 
 	LogTradeskills(
-		"container_slot [{}] guildtribute_slot [{}]",
+		"container_slot [{}] guildtribute_slot [{}] world object [{}] db_id [{}] type [{}] name [{}]",
 		in_combine->container_slot,
-		in_combine->guildtribute_slot
+		in_combine->guildtribute_slot,
+		worldo ? worldo->GetID() : 0,
+		worldo ? worldo->GetDBID() : 0,
+		worldo ? worldo->GetType() : 0,
+		worldo ? worldo->GetModelName() : "none"
 	);
 
 	EQ::InventoryProfile &user_inv  = user->GetInv();
@@ -397,6 +401,12 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 	}
 
 	if (!content_db.GetTradeRecipe(container, c_type, some_id, user, &spec, &is_augmented)) {
+
+		LogTradeskills(
+			"NO RECIPE: c_type [{}] some_id [{}] worldcontainer [{}] -- these are the two values the "
+			"recipe lookup matches the container on",
+			c_type, some_id, worldcontainer ? "yes" : "no"
+		);
 
 		LogTradeskillsDetail("Check 2");
 
