@@ -263,8 +263,8 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 		return;
 	}
 
-	LogTradeskills(
-		"container_slot [{}] guildtribute_slot [{}] world object [{}] db_id [{}] type [{}] name [{}]",
+	LogError(
+		"TRACE COMBINE ATTEMPT: container_slot [{}] guildtribute_slot [{}] world object [{}] db_id [{}] type [{}] name [{}]",
 		in_combine->container_slot,
 		in_combine->guildtribute_slot,
 		worldo ? worldo->GetID() : 0,
@@ -402,8 +402,8 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 
 	if (!content_db.GetTradeRecipe(container, c_type, some_id, user, &spec, &is_augmented)) {
 
-		LogTradeskills(
-			"NO RECIPE: c_type [{}] some_id [{}] worldcontainer [{}] -- these are the two values the "
+		LogError(
+			"TRACE NO RECIPE: c_type [{}] some_id [{}] worldcontainer [{}] -- these are the two values the "
 			"recipe lookup matches the container on",
 			c_type, some_id, worldcontainer ? "yes" : "no"
 		);
@@ -533,8 +533,8 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 		}
 		container->Clear();
 	}
-	LogTradeskills(
-		"COMBINE: [{}] recipe [{}] ([{}]) container cleared, cursor depth [{}]",
+	LogError(
+		"TRACE COMBINE: [{}] recipe [{}] ([{}]) container cleared, cursor depth [{}]",
 		user->GetName(), spec.name, spec.recipe_id, user->GetInv().CursorSize()
 	);
 
