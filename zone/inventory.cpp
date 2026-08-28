@@ -735,9 +735,8 @@ bool Client::SummonItem(uint32 item_id, int16 charges, uint32 aug1, uint32 aug2,
 
 	// put item into inventory
 	if (to_slot == EQ::invslot::slotCursor) {
-		// PushItemOnCursor() already tells the client when it is the right thing to do; sending the
-		// same packet again here was a duplicate, and a second overwrite of the visible cursor.
 		PushItemOnCursor(*inst);
+		SendItemPacket(EQ::invslot::slotCursor, inst, ItemPacketLimbo);
 	} else {
 		PutItemInInventory(to_slot, *inst, true);
 	}
@@ -1123,19 +1122,10 @@ bool Client::PushItemOnCursor(const EQ::ItemInstance& inst, bool client_update)
 {
 	LogInventory("Putting item [{}] ([{}]) on the cursor", inst.GetItem()->Name, inst.GetItem()->ID);
 
-	const bool cursor_was_empty = m_inv.CursorEmpty();
-
 	EvolvingItemsManager::Instance()->DoLootChecks(CharacterID(), EQ::invslot::slotCursor, inst);
 	m_inv.PushCursor(inst);
 
-	// Same rule PutLootInInventory() already follows: never describe a SUBORDINATE cursor item to
-	// a RoF+ client. The contract there (see SendCursorBuffer) is that the client's visible cursor
-	// is always our front-of-queue, and we reveal the next one as each is consumed. Sending an
-	// item packet for something pushed behind the front overwrites what the client is showing
-	// while our queue still starts with the original -- so the two disagree about what "the cursor
-	// item" is, and every move the client then makes against it is rejected as a desync. That was
-	// 176 of 215 desyncs logged during a scripted combine run.
-	if (client_update && (cursor_was_empty || ClientVersion() < EQ::versions::ClientVersion::RoF)) {
+	if (client_update) {
 		SendItemPacket(EQ::invslot::slotCursor, &inst, ItemPacketLimbo);
 	}
 
@@ -2398,25 +2388,16 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 	const bool to_world   = (move_slots->to_slot   >= (uint32) EQ::invslot::WORLD_BEGIN &&
 	                         move_slots->to_slot   <= (uint32) EQ::invslot::WORLD_END);
 
-	const bool world_move = from_world || to_world;
-
 	// Say nothing while the player is working a tradeskill container. Every desync observed during
 	// a scripted combine run was a cursor move (215 of 215, 213 of them with a container open) --
 	// the server pushes each combine result and fail-return onto the cursor while the script is
 	// also using the cursor to feed components, so the two disagree about what is on it. The
 	// resync below still runs; it is only the chat spam that goes, and the error log above keeps
 	// the full record.
-	const bool quiet = world_move || m_tradeskill_object != nullptr;
+	const bool quiet = from_world || to_world || m_tradeskill_object != nullptr;
 
 	if (!quiet) {
 		Message(Chat::Yellow, "Inventory Desyncronization detected: Resending slot data...");
-	}
-
-	if (world_move) {
-		Object* worldo = m_tradeskill_object ? m_tradeskill_object : ReacquireTradeskillObject();
-		if (worldo) {
-			worldo->MarkClientResyncNeeded();
-		}
 	}
 
 	if (move_slots->from_slot >= EQ::invslot::EQUIPMENT_BEGIN && move_slots->from_slot <= EQ::invbag::CURSOR_BAG_END) {

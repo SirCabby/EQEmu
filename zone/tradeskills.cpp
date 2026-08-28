@@ -406,13 +406,6 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 			user->Message(Chat::Emote, "You must remove augments from all component items before you can attempt this combine.");
 		}
 
-		// Leave the container alone. Components staying put on an invalid combine is how the game
-		// has always worked, so the only thing to do here is make sure the client is looking at what
-		// we actually hold.
-		if (worldcontainer && worldo) {
-			worldo->MarkClientResyncNeeded();
-		}
-
 		auto outapp = new EQApplicationPacket(OP_TradeSkillCombine, 0);
 		user->QueuePacket(outapp);
 		safe_delete(outapp);
@@ -515,15 +508,11 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 	//now clean out the containers.
 	if(worldcontainer){
 		container->Clear();
-
-		// Do NOT wipe the client's view of the container from here. A script combining several
-		// times a second has already sent the moves for the next batch by the time this lands, and
-		// a bare OP_ClearObject erases them on the client while the server keeps them -- that is
-		// how a component ends up in neither the inventory nor the container until the player
-		// closes the oven. Queue an authoritative redescription for the end of the pass instead,
-		// once every move we are going to receive for this batch has been applied.
-		worldo->MarkClientResyncNeeded();
-
+		outapp = new EQApplicationPacket(OP_ClearObject, sizeof(ClearObject_Struct));
+		ClearObject_Struct *cos = (ClearObject_Struct *)outapp->pBuffer;
+		cos->Clear = 1;
+		user->QueuePacket(outapp);
+		safe_delete(outapp);
 		database.DeleteWorldContainer(worldo->m_id, zone->GetZoneID());
 	} else{
 		for (uint8 i = EQ::invbag::SLOT_BEGIN; i < EQ::invtype::WORLD_SIZE; i++) {

@@ -458,7 +458,6 @@ void Object::Close() {
 		user->SetTradeskillObject(nullptr);
 	}
 
-	m_client_resync_pending = false;
 	user = nullptr;
 }
 
@@ -492,45 +491,6 @@ bool Object::ReacquireUser(Client* c)
 	c->SetTradeskillObject(this);
 
 	return true;
-}
-
-// Redescribe this container to the client from scratch: wipe its view and resend whatever we
-// actually hold, mirroring the open sequence in HandleClick().
-//
-// A world container lives in Object::m_inst, not in the client's InventoryProfile, so
-// Client::SwapItemResync() cannot describe it slot by slot -- a rejected move to or from a
-// world slot used to leave a phantom item sitting in the container window with no way to
-// clear it short of closing and reopening the container by hand.
-void Object::ResyncContainerContents(Client* c)
-{
-	if (!c || !m_inst || !m_inst->IsType(EQ::item::ItemClassBag)) {
-		return;
-	}
-
-	// ONLY ever send the wipe, and only when we are actually empty.
-	//
-	// Resending contents here corrupted inventories: SendItemPacket(i, inst,
-	// ItemPacketWorldContainer) numbers world container slots 0-9, and the client only reads
-	// those as container slots inside the open handshake that HandleClick() performs. Sent
-	// outside it the client applied them to possessions slots 0-9 instead -- charm, ear, head,
-	// face, ear, neck, shoulders, arms -- and the moves it then made against that false view
-	// destroyed real equipment. Never send world container item packets outside HandleClick().
-	//
-	// The wipe on its own is safe: it is exactly what Close() sends. Restricting it to an empty
-	// container is what keeps it correct, because the case this exists for is a clear that
-	// reaches the client after it staged the next batch. If we are holding those items the
-	// client put there, its view already matches and there is nothing to say.
-	for (uint8 i = EQ::invbag::SLOT_BEGIN; i <= EQ::invbag::SLOT_END; i++) {
-		if (m_inst->GetItem(i)) {
-			return;
-		}
-	}
-
-	auto outapp = new EQApplicationPacket(OP_ClearObject, sizeof(ClearObject_Struct));
-	ClearObject_Struct *cos = (ClearObject_Struct *)outapp->pBuffer;
-	cos->Clear = 1;
-	c->QueuePacket(outapp);
-	safe_delete(outapp);
 }
 
 // Remove item from container
@@ -612,18 +572,6 @@ bool Object::Process(){
 		user->SetTradeskillObject(nullptr);
 
 		user = nullptr;
-	}
-
-	// Flush any redescription queued during the previous pass. Doing it here rather than inline
-	// is the whole point: every item move the client sent in that pass has been applied by now,
-	// so what we send is the settled truth instead of a snapshot that a still-in-flight move is
-	// about to invalidate.
-	if (m_client_resync_pending) {
-		m_client_resync_pending = false;
-
-		if (user) {
-			ResyncContainerContents(user);
-		}
 	}
 
 	return true;
