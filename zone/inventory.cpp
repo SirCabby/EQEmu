@@ -735,8 +735,9 @@ bool Client::SummonItem(uint32 item_id, int16 charges, uint32 aug1, uint32 aug2,
 
 	// put item into inventory
 	if (to_slot == EQ::invslot::slotCursor) {
+		// PushItemOnCursor() already tells the client when it is the right thing to do; sending the
+		// same packet again here was a duplicate, and a second overwrite of the visible cursor.
 		PushItemOnCursor(*inst);
-		SendItemPacket(EQ::invslot::slotCursor, inst, ItemPacketLimbo);
 	} else {
 		PutItemInInventory(to_slot, *inst, true);
 	}
@@ -1122,10 +1123,19 @@ bool Client::PushItemOnCursor(const EQ::ItemInstance& inst, bool client_update)
 {
 	LogInventory("Putting item [{}] ([{}]) on the cursor", inst.GetItem()->Name, inst.GetItem()->ID);
 
+	const bool cursor_was_empty = m_inv.CursorEmpty();
+
 	EvolvingItemsManager::Instance()->DoLootChecks(CharacterID(), EQ::invslot::slotCursor, inst);
 	m_inv.PushCursor(inst);
 
-	if (client_update) {
+	// Same rule PutLootInInventory() already follows: never describe a SUBORDINATE cursor item to
+	// a RoF+ client. The contract there (see SendCursorBuffer) is that the client's visible cursor
+	// is always our front-of-queue, and we reveal the next one as each is consumed. Sending an
+	// item packet for something pushed behind the front overwrites what the client is showing
+	// while our queue still starts with the original -- so the two disagree about what "the cursor
+	// item" is, and every move the client then makes against it is rejected as a desync. That was
+	// 176 of 215 desyncs logged during a scripted combine run.
+	if (client_update && (cursor_was_empty || ClientVersion() < EQ::versions::ClientVersion::RoF)) {
 		SendItemPacket(EQ::invslot::slotCursor, &inst, ItemPacketLimbo);
 	}
 

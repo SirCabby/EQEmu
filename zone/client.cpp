@@ -11639,8 +11639,8 @@ void Client::SummonBaggedItems(uint32 bag_item_id, const std::vector<LootItem>& 
 		}
 	}
 
+	// PushItemOnCursor() handles the client update, including the RoF+ subordinate-cursor rule
 	PushItemOnCursor(*summoned_bag);
-	SendItemPacket(EQ::invslot::slotCursor, summoned_bag, ItemPacketLimbo);
 	safe_delete(summoned_bag);
 }
 
