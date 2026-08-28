@@ -2388,21 +2388,24 @@ void Client::SwapItemResync(MoveItem_Struct* move_slots) {
 	const bool to_world   = (move_slots->to_slot   >= (uint32) EQ::invslot::WORLD_BEGIN &&
 	                         move_slots->to_slot   <= (uint32) EQ::invslot::WORLD_END);
 
-	// Combining under a script trips this routinely and the server puts it right on its own, so
-	// it is not worth interrupting the player about -- and the chat spam is what made the
-	// condition look worse than it is. Reconcile silently; the error log above has the detail.
-	const bool quiet = from_world || to_world;
+	const bool world_move = from_world || to_world;
+
+	// Say nothing while the player is working a tradeskill container. Every desync observed during
+	// a scripted combine run was a cursor move (215 of 215, 213 of them with a container open) --
+	// the server pushes each combine result and fail-return onto the cursor while the script is
+	// also using the cursor to feed components, so the two disagree about what is on it. The
+	// resync below still runs; it is only the chat spam that goes, and the error log above keeps
+	// the full record.
+	const bool quiet = world_move || m_tradeskill_object != nullptr;
 
 	if (!quiet) {
 		Message(Chat::Yellow, "Inventory Desyncronization detected: Resending slot data...");
 	}
-	else {
+
+	if (world_move) {
 		Object* worldo = m_tradeskill_object ? m_tradeskill_object : ReacquireTradeskillObject();
 		if (worldo) {
 			worldo->MarkClientResyncNeeded();
-		}
-		else {
-			Message(Chat::Red, "Could not resyncronize the tradeskill container - close and reopen it.");
 		}
 	}
 
