@@ -406,38 +406,10 @@ void Object::HandleCombine(Client* user, const NewCombine_Struct* in_combine, Ob
 			user->Message(Chat::Emote, "You must remove augments from all component items before you can attempt this combine.");
 		}
 
-		// A world container the two sides disagree about is UNRECOVERABLE in place: its contents
-		// live in Object::m_inst rather than the player's inventory, and they cannot be described
-		// to the client outside the open handshake (doing so makes the client apply container
-		// slots 0-9 to possessions and wreck equipped gear). So when the server holds something
-		// the player cannot see, the container looks correct to them, nothing matches, and no
-		// amount of clicking Combine ever helps -- a scripted run just wedges there permanently.
-		//
-		// Hand the contents back instead. This is the same path Object::Close() uses, so it is
-		// ordinary inventory traffic with no world container packets, and it never drops an item:
-		// MoveItemToInventory() stacks, then finds a free slot, then falls back to the cursor.
-		// Both sides finish empty and agreed, and the queued OP_ClearObject tells the client.
+		// Leave the container alone. Components staying put on an invalid combine is how the game
+		// has always worked, so the only thing to do here is make sure the client is looking at what
+		// we actually hold.
 		if (worldcontainer && worldo) {
-			int returned = 0;
-			for (uint8 i = EQ::invbag::SLOT_BEGIN; i <= EQ::invbag::SLOT_END; i++) {
-				EQ::ItemInstance *returned_inst = container->PopItem(i);
-				if (returned_inst) {
-					user->MoveItemToInventory(returned_inst, true);
-					safe_delete(returned_inst);
-					returned++;
-				}
-			}
-
-			if (returned) {
-				database.DeleteWorldContainer(worldo->m_id, zone->GetZoneID());
-
-				LogTradeskills(
-					"No recipe matched for [{}]; returned [{}] item(s) from the world container",
-					user->GetName(),
-					returned
-				);
-			}
-
 			worldo->MarkClientResyncNeeded();
 		}
 
